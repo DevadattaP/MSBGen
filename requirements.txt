@@ -1,0 +1,13 @@
+# Web app
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+
+# Image processing
+numpy>=1.26
+pillow>=10.0
+opencv-python>=4.8   # decoding 16-bit colour PNG/TIFF (Pillow has no 16-bit RGB mode)
+
+# Development / testing
+pytest>=8.0
+httpx>=0.27

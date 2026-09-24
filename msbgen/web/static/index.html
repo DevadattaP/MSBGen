@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MSBGen · Bit-plane Explorer</title>
+  <meta name="description" content="Slice an image into its 8-bit planes per channel." />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%234f46e5'/%3E%3Crect x='3' y='3' width='4' height='4' fill='white'/%3E%3Crect x='9' y='9' width='4' height='4' fill='white'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/static/css/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 16 16" aria-hidden="true"><rect width="16" height="16" rx="3.5" fill="currentColor"/><rect x="3" y="3" width="4" height="4" fill="#fff"/><rect x="9" y="9" width="4" height="4" fill="#fff"/><rect x="9" y="3" width="4" height="4" fill="#fff" opacity=".35"/></svg>
+      <div>
+        <h1>MSBGen</h1>
+        <p class="tagline">Generative image reconstruction from most-significant bit-planes</p>
+      </div>
+    </div>
+    <button id="theme-toggle" class="icon-btn" type="button" aria-label="Toggle colour theme" title="Toggle theme">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z"/></svg>
+    </button>
+  </header>
+
+  <main class="container">
+    <section class="card input-card" aria-labelledby="input-title">
+      <div class="card-head">
+        <h2 id="input-title">1 · Input image</h2>
+        <span class="hint">PNG, JPEG, BMP, TIFF, WebP · sliced as grayscale or RGB · 8- or 16-bit</span>
+      </div>
+
+      <label id="dropzone" class="dropzone" for="file-input" tabindex="0" role="button" aria-label="Choose an image">
+        <input id="file-input" type="file" accept="image/*,.tif,.tiff" hidden />
+        <div class="dropzone-empty">
+          <svg viewBox="0 0 24 24" width="40" height="40" aria-hidden="true"><path fill="currentColor" d="M19 13v6H5v-6H3v6a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-6h-2zm-6-.83 2.59-2.58L17 11l-5 5-5-5 1.41-1.41L11 12.17V3h2v9.17z" transform="rotate(180 12 12)"/></svg>
+          <p><strong>Drop an image here</strong> or click to browse</p>
+        </div>
+        <img id="preview" class="preview" alt="Selected image preview" hidden />
+      </label>
+
+      <div class="input-footer">
+        <dl id="file-meta" class="meta" hidden></dl>
+        <div class="actions">
+          <button id="clear-btn" class="btn ghost" type="button" disabled>Clear</button>
+          <button id="slice-btn" class="btn primary" type="button" disabled>
+            <span class="spinner" aria-hidden="true"></span>
+            <span class="label">Slice bit-planes</span>
+          </button>
+        </div>
+      </div>
+      <div id="notes" class="notes" role="status" hidden></div>
+      <div id="error" class="error" role="alert" hidden></div>
+    </section>
+
+    <section id="results" class="results" aria-labelledby="results-title" hidden>
+      <div class="results-head">
+        <h2 id="results-title">2 · Bit-planes</h2>
+        <p id="results-summary" class="hint"></p>
+      </div>
+      <p class="formula">
+        <span id="formula"></span>
+        <span class="legend"><i class="sw sw-1"></i>1 <i class="sw sw-0"></i>0</span>
+      </p>
+      <div id="channels"></div>
+    </section>
+  </main>
+
+  <dialog id="lightbox" class="lightbox">
+    <div class="lightbox-head">
+      <strong id="lightbox-title"></strong>
+      <div class="lightbox-actions">
+        <a id="lightbox-download" class="btn ghost small" download>Download PNG</a>
+        <button class="icon-btn" type="button" data-close aria-label="Close">✕</button>
+      </div>
+    </div>
+    <div class="lightbox-body"><img id="lightbox-img" alt="" /></div>
+    <p id="lightbox-caption" class="hint"></p>
+  </dialog>
+
+  <template id="plane-template">
+    <figure class="plane">
+      <button class="plane-thumb" type="button"><img alt="" loading="lazy" /></button>
+      <figcaption>
+        <span class="plane-name"></span>
+        <span class="plane-weight"></span>
+        <span class="plane-stats"></span>
+      </figcaption>
+    </figure>
+  </template>
+
+  <script src="/static/js/app.js" type="module"></script>
+</body>
+</html>
