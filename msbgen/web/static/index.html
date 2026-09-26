@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>MSBGen · Bit-plane Explorer</title>
-  <meta name="description" content="Slice an image into its 8-bit planes per channel." />
+  <meta name="description" content="Slice an image into its bit-planes and analyse their information content." />
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%234f46e5'/%3E%3Crect x='3' y='3' width='4' height='4' fill='white'/%3E%3Crect x='9' y='9' width='4' height='4' fill='white'/%3E%3C/svg%3E" />
   <link rel="stylesheet" href="/static/css/styles.css" />
 </head>
@@ -44,7 +44,7 @@
           <button id="clear-btn" class="btn ghost" type="button" disabled>Clear</button>
           <button id="slice-btn" class="btn primary" type="button" disabled>
             <span class="spinner" aria-hidden="true"></span>
-            <span class="label">Slice bit-planes</span>
+            <span class="label">Slice &amp; analyse</span>
           </button>
         </div>
       </div>
@@ -62,6 +62,60 @@
         <span class="legend"><i class="sw sw-1"></i>1 <i class="sw sw-0"></i>0</span>
       </p>
       <div id="channels"></div>
+    </section>
+
+    <section id="analysis" class="results" aria-labelledby="analysis-title" hidden>
+      <div class="results-head">
+        <h2 id="analysis-title">3 · Analysis</h2>
+        <p id="analysis-summary" class="hint"></p>
+      </div>
+      <p id="analysis-status" class="card status" role="status"><span class="spinner dark" aria-hidden="true"></span>Analysing bit-planes…</p>
+
+      <div id="analysis-body" class="analysis" hidden>
+        <section class="card" aria-labelledby="rec-title">
+          <div class="card-head">
+            <h3 id="rec-title">Reconstruction from the top k planes</h3>
+            <div id="rec-metric" class="seg" role="group" aria-label="Metric">
+              <button type="button" data-metric="psnr" aria-pressed="true">PSNR</button>
+              <button type="button" data-metric="ssim" aria-pressed="false">SSIM</button>
+              <button type="button" data-metric="mae" aria-pressed="false">MAE</button>
+            </div>
+          </div>
+          <p class="hint">
+            Keep the k most-significant planes and fill in the missing bits.
+            <strong>Midpoint</strong> sets them to the centre of their range, (2<sup>n−k</sup> − 1)/2
+            (e.g. 128·B<sub>7</sub> + 63.5, the constant baseline); <strong>zero</strong> truncates them.
+            Tiles show the midpoint fill.
+          </p>
+          <div id="rec-chart" class="chart"></div>
+          <div id="rec-legend" class="chart-legend"></div>
+          <div id="rec-grid" class="plane-grid"></div>
+          <div class="table-wrap"><table id="rec-table" class="data-table"></table></div>
+        </section>
+
+        <section class="card" aria-labelledby="entropy-title">
+          <div class="card-head"><h3 id="entropy-title">Information per plane</h3></div>
+          <p class="hint">
+            <strong>H</strong> is the i.i.d. entropy (ignores structure). <strong>H | ctx</strong> is the
+            entropy given the 4 causal neighbours (W, NW, N, NE) in the same plane — roughly what a
+            context-model coder would pay. <strong>ρ↔</strong> is the correlation with neighbouring pixels:
+            near 1 for structured planes, near 0 for noise-like ones.
+          </p>
+          <div id="entropy-chart" class="chart"></div>
+          <div id="entropy-legend" class="chart-legend"></div>
+          <div class="table-wrap"><table id="entropy-table" class="data-table"></table></div>
+        </section>
+
+        <section class="card" aria-labelledby="corr-title">
+          <div class="card-head">
+            <h3 id="corr-title">Correlation between planes</h3>
+            <span class="legend"><span>−1</span><i class="corr-scale"></i><span>+1</span></span>
+          </div>
+          <p class="hint">Pearson correlation between every pair of planes, pixel by pixel. Hover or tap a cell.</p>
+          <div id="corr-chart" class="heatmap"></div>
+          <p id="corr-readout" class="readout">&nbsp;</p>
+        </section>
+      </div>
     </section>
   </main>
 

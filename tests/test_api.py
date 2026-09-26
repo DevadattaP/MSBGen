@@ -1,3 +1,4 @@
+import base64
 import io
 
 import cv2
@@ -130,8 +131,6 @@ def test_16bit_rgba_png_drops_alpha_keeps_16_bits():
 
 
 def _decode_data_url(url: str) -> np.ndarray:
-    import base64
-
     return np.asarray(Image.open(io.BytesIO(base64.b64decode(url.split(",", 1)[1]))).convert("RGB"))
 
 
@@ -179,3 +178,44 @@ def test_palette_expanded_with_note():
 def test_invalid_image_rejected():
     res = _post(b"not an image", "bad.png")
     assert res.status_code == 400
+
+
+def _analyse(data: bytes, name: str = "x.png"):
+    return client.post("/api/analysis", files={"file": (name, data, "application/octet-stream")})
+
+
+def test_analysis_rgb():
+    y, x = np.mgrid[0:32, 0:48]
+    arr = np.stack([(x * 5) % 256, (y * 7) % 256, (x + y) % 256], axis=-1).astype(np.uint8)
+    res = _analyse(_encode(Image.fromarray(arr, "RGB")))
+    assert res.status_code == 200
+    body = res.json()
+    assert (body["color_mode"], body["bit_depth"]) == ("RGB", 8)
+    assert len(body["planes"]) == 24
+    assert body["correlation"]["labels"][:2] == ["R·B7", "R·B6"]
+    assert len(body["correlation"]["matrix"]) == 24
+    recs = body["reconstructions"]
+    assert [r["k"] for r in recs] == list(range(1, 9))
+    assert recs[0]["bits"] == [7] and recs[2]["bits"] == [7, 6, 5]
+    assert recs[-1]["psnr"] == {"zero": None, "mid": None}  # lossless → infinite → null
+    assert recs[0]["psnr"]["mid"] > recs[0]["psnr"]["zero"]
+    assert _decode_data_url(recs[-1]["image"]).tolist() == arr.tolist()
+
+
+def test_analysis_msb_reconstruction_image_is_midpoint():
+    arr = np.array([[0, 127, 128, 255]], dtype=np.uint8).repeat(4, axis=0)
+    body = _analyse(_encode(Image.fromarray(arr, "L"))).json()
+    assert body["correlation"]["labels"] == [f"B{k}" for k in range(7, -1, -1)]
+    b7 = _decode_data_url(body["reconstructions"][0]["image"])[..., 0]
+    assert b7[0].tolist() == [64, 64, 192, 192]  # 63.5 and 191.5 rounded half up
+    assert body["reconstructions"][0]["ssim"]["mid"] is None  # 4×4 is below the SSIM window
+
+
+def test_analysis_constant_image_has_null_correlations():
+    body = _analyse(_encode(Image.new("L", (16, 16), 100))).json()
+    assert all(p["spatial_correlation"] is None for p in body["planes"])
+    assert body["correlation"]["matrix"][0][0] is None
+
+
+def test_analysis_rejects_invalid_image():
+    assert _analyse(b"nope").status_code == 400

@@ -64,7 +64,9 @@ def load_image(data: bytes, max_pixels: int | None = None) -> LoadedImage:
     """Decode image bytes into grayscale or RGB, preserving the bit depth."""
     try:
         img = Image.open(io.BytesIO(data))
-    except (UnidentifiedImageError, OSError) as exc:
+    except UnidentifiedImageError as exc:
+        raise ImageDecodeError("could not decode image: not a recognised image format") from exc
+    except OSError as exc:
         raise ImageDecodeError(f"could not decode image: {exc}") from exc
 
     if max_pixels is not None and img.width * img.height > max_pixels:
@@ -84,7 +86,7 @@ def load_image(data: bytes, max_pixels: int | None = None) -> LoadedImage:
             notes.append("Dropped alpha channel.")
         color_mode = "L" if decoded_mode == "LA" else "RGB"
         return LoadedImage(
-            array, color_mode, 16, _to_preview(array, 16), original_mode, original_format, notes
+            array, color_mode, 16, to_preview(array, 16), original_mode, original_format, notes
         )
 
     try:
@@ -100,7 +102,7 @@ def load_image(data: bytes, max_pixels: int | None = None) -> LoadedImage:
     mode = img.mode
     if mode in PILLOW_16BIT_GRAY_MODES:
         array = np.asarray(img).astype(np.uint16)[..., np.newaxis]
-        return LoadedImage(array, "L", 16, _to_preview(array, 16), original_mode, original_format, notes)
+        return LoadedImage(array, "L", 16, to_preview(array, 16), original_mode, original_format, notes)
 
     if mode == "I":
         wide = np.asarray(img)
@@ -108,14 +110,14 @@ def load_image(data: bytes, max_pixels: int | None = None) -> LoadedImage:
             raise ImageDecodeError("32-bit integer images outside the 16-bit range are not supported")
         array = wide.astype(np.uint16)[..., np.newaxis]
         notes.append("32-bit integer image with values in the 16-bit range; treated as 16-bit.")
-        return LoadedImage(array, "L", 16, _to_preview(array, 16), original_mode, original_format, notes)
+        return LoadedImage(array, "L", 16, to_preview(array, 16), original_mode, original_format, notes)
 
     if mode == "F":
         raise ImageDecodeError("floating-point images (mode F) are not supported")
 
     if mode == "1":
         array = np.asarray(img).astype(np.uint8)[..., np.newaxis]
-        return LoadedImage(array, "L", 1, _to_preview(array, 1), original_mode, original_format, notes)
+        return LoadedImage(array, "L", 1, to_preview(array, 1), original_mode, original_format, notes)
 
     if mode in {"L", "LA"}:
         if mode == "LA":
@@ -181,7 +183,18 @@ def _decode_16bit_colour(data: bytes, expected_mode: str) -> tuple[np.ndarray, s
     raise ImageDecodeError(f"unexpected {channels}-channel decode for 16-bit {expected_mode} image")
 
 
-def _to_preview(array: np.ndarray, bit_depth: int) -> np.ndarray:
+def to_grayscale(array: np.ndarray) -> np.ndarray:
+    """(H, W, 3) RGB → (H, W, 1) luma (ITU-R BT.601, as Pillow's "L"), same dtype and bit depth.
+
+    Grayscale input (H, W, 1) is returned unchanged.
+    """
+    if array.shape[-1] == 1:
+        return array
+    luma = array.astype(np.float64) @ np.array([0.299, 0.587, 0.114])
+    return np.rint(luma).astype(array.dtype)[..., np.newaxis]
+
+
+def to_preview(array: np.ndarray, bit_depth: int) -> np.ndarray:
     """8-bit version of an (H, W, 1) or (H, W, 3) array for display only."""
     if bit_depth == 16:
         array = (array >> 8).astype(np.uint8)

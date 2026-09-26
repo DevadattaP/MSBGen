@@ -1,5 +1,15 @@
 """Framework-independent image / bit-plane logic (no web dependencies)."""
 
+from msbgen.core.analysis import (
+    ImageAnalysis,
+    PlaneStats,
+    ReconstructionStats,
+    analyze_image,
+    context_entropy,
+    msb_reconstruction,
+    plane_correlation,
+    spatial_correlation,
+)
 from msbgen.core.bitplanes import (
     binary_entropy,
     combine_channel_planes,
@@ -13,17 +23,34 @@ from msbgen.core.image_io import (
     encode_png,
     encode_rgb_bits_png,
     load_image,
+    to_grayscale,
+    to_preview,
 )
+from msbgen.core.metrics import mae, mse, psnr, ssim
 
 __all__ = [
+    "ImageAnalysis",
     "ImageDecodeError",
     "LoadedImage",
+    "PlaneStats",
+    "ReconstructionStats",
+    "analyze_image",
     "binary_entropy",
     "combine_channel_planes",
+    "context_entropy",
     "encode_png",
     "encode_rgb_bits_png",
     "infer_bit_depth",
     "load_image",
+    "mae",
+    "msb_reconstruction",
+    "mse",
+    "plane_correlation",
+    "psnr",
     "reconstruct_from_planes",
     "slice_bitplanes",
+    "spatial_correlation",
+    "ssim",
+    "to_grayscale",
+    "to_preview",
 ]

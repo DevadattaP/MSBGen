@@ -17,6 +17,10 @@
   --ch-g: #1f9d55;
   --ch-b: #2f6fe4;
   --ch-rgb: conic-gradient(var(--ch-r) 0 33%, var(--ch-g) 0 67%, var(--ch-b) 0);
+  --corr-pos: #d9480f;
+  --corr-neg: #1c7ed6;
+  --series-mid: var(--accent);
+  --series-zero: #8a93a6;
   --radius: 14px;
   --shadow: 0 1px 2px rgb(16 24 40 / 0.05), 0 4px 16px rgb(16 24 40 / 0.06);
   color-scheme: light;
@@ -240,6 +244,70 @@ h2 { font-size: 1.05rem; }
   font-size: 0.65rem; font-weight: 700; vertical-align: 1px;
   background: var(--accent-soft); color: var(--accent);
 }
+
+/* ---------- Analysis ---------- */
+/* Grid items default to min-width: auto, so a wide table would stretch the page on phones. */
+.container > *, .analysis > * { min-width: 0; }
+.analysis { display: grid; gap: 1.25rem; }
+.analysis .card-head { margin-bottom: 0.5rem; align-items: center; }
+.analysis h3 { margin: 0; font-size: 0.95rem; }
+.analysis .card > .hint { margin-bottom: 0.75rem; max-width: 80ch; }
+.analysis .plane-grid { margin: 1rem 0; }
+
+.status { display: flex; align-items: center; gap: 0.6rem; margin: 0; color: var(--muted); }
+.status.error-text { color: var(--danger); }
+.spinner.dark { display: inline-block; border-color: var(--border); border-top-color: var(--accent); }
+
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; }
+.seg button {
+  font: inherit; font-size: 0.8rem; font-weight: 600; padding: 0.3rem 0.75rem;
+  border: 0; background: transparent; color: var(--muted); cursor: pointer;
+}
+.seg button + button { border-left: 1px solid var(--border); }
+.seg button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+
+.chart { min-width: 0; overflow: hidden; }
+.chart svg { display: block; }
+.chart .grid { stroke: var(--border); }
+.chart .axis { stroke: var(--muted); }
+.chart .tick { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.chart .title { fill: var(--muted); font-size: 11px; font-weight: 600; }
+.chart .series { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.chart .series.dashed { stroke-dasharray: 5 4; stroke-width: 1.75; }
+.chart .dot { stroke: var(--surface); stroke-width: 1.5; }
+
+.chart-legend {
+  display: flex; flex-wrap: wrap; gap: 0.3rem 1rem; margin-top: 0.4rem;
+  font-size: 0.8rem; color: var(--muted);
+}
+.chart-legend span { display: inline-flex; align-items: center; gap: 0.4rem; }
+.chart-legend svg { flex: none; }
+
+.table-wrap { overflow-x: auto; margin-top: 0.75rem; border: 1px solid var(--border); border-radius: 10px; }
+.data-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+.data-table th, .data-table td { padding: 0.4rem 0.65rem; text-align: right; white-space: nowrap; }
+.data-table th:first-child, .data-table td:first-child { text-align: left; }
+.data-table thead th { color: var(--muted); font-weight: 600; background: var(--surface-2); }
+.data-table thead tr + tr th { font-weight: 500; }
+.data-table thead th[colspan] { text-align: center; }
+.data-table tbody tr + tr td { border-top: 1px solid var(--border); }
+.data-table .group-start { border-left: 1px solid var(--border); }
+.data-table .ch-name { display: inline-flex; align-items: center; gap: 0.35rem; }
+.data-table .channel-dot { width: 8px; height: 8px; }
+
+.heatmap { min-width: 0; max-width: 560px; }
+.heatmap svg { display: block; width: 100%; height: auto; touch-action: manipulation; }
+.heatmap .cell-bg { fill: var(--surface-2); }
+.heatmap .cell.pos { fill: var(--corr-pos); }
+.heatmap .cell.neg { fill: var(--corr-neg); }
+.heatmap .cell.active { stroke: var(--text); stroke-width: 1.5; }
+.heatmap .tick { fill: var(--muted); font-size: 9px; }
+.heatmap .group { font-size: 11px; font-weight: 700; }
+.corr-scale {
+  display: inline-block; width: 90px; height: 10px; border-radius: 3px; border: 1px solid var(--border);
+  background: linear-gradient(to right, var(--corr-neg), var(--surface-2), var(--corr-pos));
+}
+.readout { margin: 0.5rem 0 0; font-size: 0.85rem; font-variant-numeric: tabular-nums; min-height: 1.3em; }
 
 /* ---------- Lightbox ---------- */
 .lightbox {

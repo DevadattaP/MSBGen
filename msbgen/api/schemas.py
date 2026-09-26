@@ -28,7 +28,7 @@ class CombinedPlane(BaseModel):
     )
 
 
-class BitPlaneResponse(BaseModel):
+class ImageInfo(BaseModel):
     filename: str | None
     width: int
     height: int
@@ -38,9 +38,53 @@ class BitPlaneResponse(BaseModel):
     bit_depth: int = Field(description="Bits (= planes) per channel: 1, 8 or 16")
     channels: list[Channel]
     notes: list[str]
+
+
+class BitPlaneResponse(ImageInfo):
     preview: str = Field(description="8-bit display rendering of the image, as a PNG data URL")
     planes: list[BitPlane] = Field(description="Ordered by channel, then from MSB to LSB")
     combined: list[CombinedPlane] = Field(
         default_factory=list,
         description="RGB images only: per-bit colour planes, from MSB to LSB",
     )
+
+
+class PlaneAnalysis(BaseModel):
+    channel: str
+    channel_index: int = Field(ge=0)
+    bit: int = Field(ge=0)
+    ones_ratio: float
+    entropy: float = Field(description="i.i.d. entropy H(B_k), bits/pixel")
+    context_entropy: float = Field(
+        description="H(B_k | W, NW, N, NE neighbours in the same plane), bits/pixel"
+    )
+    spatial_correlation: float | None = Field(
+        description="Mean correlation with the right and lower neighbour; null for a constant plane"
+    )
+
+
+class FillScores(BaseModel):
+    zero: float | None = Field(description="Missing bits set to 0 (truncation)")
+    mid: float | None = Field(description="Missing bits set to the middle of their range")
+
+
+class Reconstruction(BaseModel):
+    k: int = Field(ge=1, description="Number of most-significant planes kept")
+    bits: list[int] = Field(description="Bit indices kept, MSB first")
+    bits_per_pixel: int = Field(description="Raw cost: k × channels")
+    coded_bpp: float = Field(description="Sum of the kept planes' context entropies")
+    psnr: FillScores = Field(description="dB; null means lossless (infinite)")
+    ssim: FillScores = Field(description="null if the image is smaller than the 11×11 window")
+    mae: FillScores
+    image: str = Field(description="Midpoint-fill reconstruction as an 8-bit PNG data URL")
+
+
+class Correlation(BaseModel):
+    labels: list[str] = Field(description="Plane labels, ordered by channel then MSB → LSB")
+    matrix: list[list[float | None]] = Field(description="Pearson correlation; null if undefined")
+
+
+class AnalysisResponse(ImageInfo):
+    planes: list[PlaneAnalysis] = Field(description="Ordered by channel, then from MSB to LSB")
+    correlation: Correlation
+    reconstructions: list[Reconstruction] = Field(description="k = 1 … bit_depth")
