@@ -219,3 +219,54 @@ def test_analysis_constant_image_has_null_correlations():
 
 def test_analysis_rejects_invalid_image():
     assert _analyse(b"nope").status_code == 400
+
+
+def _use_models_dir(monkeypatch, path):
+    import dataclasses
+
+    from msbgen.api import model_registry, routes
+    from msbgen.config import settings
+
+    patched = dataclasses.replace(settings, models_dir=path, device="cpu")
+    monkeypatch.setattr(model_registry, "settings", patched)
+    monkeypatch.setattr(routes, "settings", patched)
+
+
+def test_models_and_reconstruct(tmp_path, monkeypatch):
+    torch = pytest.importorskip("torch")
+    from msbgen.models import ModelConfig, MSBNet, save_checkpoint
+
+    _use_models_dir(monkeypatch, tmp_path)
+    assert client.get("/api/models").json()["models"] == []
+
+    torch.manual_seed(0)
+    model = MSBNet(ModelConfig(arch="unet", output="residual", arch_args={"width": 4, "levels": 2}))
+    save_checkpoint(tmp_path / "tiny-unet" / "best.pt", model, step=5, metrics={"val_psnr": 21.0, "val_gain_db": 1.5})
+    models = client.get("/api/models").json()["models"]
+    assert [(m["name"], m["k"], m["step"], m["val_gain_db"]) for m in models] == [("tiny-unet", 1, 5, 1.5)]
+
+    arr = np.random.default_rng(3).integers(0, 256, (24, 20, 3), dtype=np.uint8)
+    body = _post_reconstruct(_encode(Image.fromarray(arr, "RGB")))
+    assert any("grayscale" in n for n in body["notes"])
+    assert [r["name"] for r in body["results"]] == ["zero", "mid", "tiny-unet"]
+    mid = body["results"][1]
+    assert mid["psnr_gain"] == 0 and mid["msb_consistency"] == 1.0
+    assert body["results"][2]["kind"] == "model" and body["results"][2]["msb_consistency"] == 1.0
+    assert body["results"][0]["psnr_gain"] < 0
+    assert _decode_data_url(body["original"]).shape == (24, 20, 3)
+
+
+def _post_reconstruct(data: bytes, **form):
+    res = client.post("/api/reconstruct", files={"file": ("x.png", data, "image/png")}, data=form)
+    assert res.status_code == 200, res.text
+    return res.json()
+
+
+def test_reconstruct_errors(tmp_path, monkeypatch):
+    _use_models_dir(monkeypatch, tmp_path)
+    png16 = _encode(Image.fromarray(np.full((4, 4), 0xAB12, dtype=np.uint16)))
+    assert client.post("/api/reconstruct", files={"file": ("x.png", png16)}).status_code == 400
+    png8 = _encode(Image.new("L", (16, 16), 100))
+    res = client.post("/api/reconstruct", files={"file": ("x.png", png8)}, data={"models": "nope"})
+    assert res.status_code == 404
+    assert [r["name"] for r in _post_reconstruct(png8)["results"]] == ["zero", "mid"]

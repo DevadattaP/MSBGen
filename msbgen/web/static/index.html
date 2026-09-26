@@ -117,6 +117,31 @@
         </section>
       </div>
     </section>
+
+    <section id="models" class="results" aria-labelledby="models-title" hidden>
+      <div class="results-head">
+        <h2 id="models-title">4 · Model reconstruction</h2>
+        <p id="models-summary" class="hint"></p>
+      </div>
+      <p id="models-status" class="card status" role="status"><span class="spinner dark" aria-hidden="true"></span><span class="status-text">Running models…</span></p>
+
+      <section id="models-body" class="card analysis-card" aria-labelledby="models-card-title" hidden>
+        <div class="card-head">
+          <h3 id="models-card-title">Reconstruction from the transmitted planes</h3>
+          <div id="models-view" class="seg" role="group" aria-label="View">
+            <button type="button" data-view="image" aria-pressed="true">Reconstruction</button>
+            <button type="button" data-view="error" aria-pressed="false">Error ×4</button>
+          </div>
+        </div>
+        <p class="hint">
+          Every method gets only the transmitted plane(s), never the original. The constant fills are the
+          no-model baselines; trained models are found in <code>runs/&lt;name&gt;/best.pt</code>.
+          <strong>Error ×4</strong> shows |I − Î| × 4: black is exact, bright is a large error.
+        </p>
+        <div id="models-grid" class="recon-grid"></div>
+        <div class="table-wrap"><table id="models-table" class="data-table"></table></div>
+      </section>
+    </section>
   </main>
 
   <dialog id="lightbox" class="lightbox">

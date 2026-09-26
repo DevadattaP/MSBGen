@@ -27,7 +27,7 @@ research questions and milestones.
 | --- | --- |
 | Bit-plane explorer web app (slice & visualise planes) | ✅ done |
 | Bit-plane analysis (entropy, correlations, k-MSB reconstruction) | ✅ done |
-| Deterministic baselines (CNN / U-Net, residual prediction) | 🔜 next |
+| Deterministic baselines (CNN / U-Net, residual prediction) | 🚧 code done, training runs in progress |
 | Conditional diffusion / flow matching / normalizing flow | ⏳ |
 | Multi-MSB experiments, entropy coding, final codec | ⏳ |
 
@@ -146,6 +146,62 @@ A summary table is also printed to the terminal. See
 [msbgen/cli/README.md](msbgen/cli/README.md) for the column definitions and how
 the averages are computed.
 
+### Deterministic baselines
+
+This milestone asks how much of the image a plain regression network can recover
+from $B_7$ alone, before trying anything generative. It covers PLAN.md baselines
+1–4 on **8-bit grayscale** images:
+
+| # | Method | What it predicts | How to get it |
+| --- | --- | --- | --- |
+| 1 | Midpoint fill $128\,B_7 + 63.5$ | constant (no model) | always included |
+| 2 | Small CNN (8 conv layers, 17 px receptive field) | $I$ | `--preset cnn` |
+| 3 | U-Net (4 levels, 4.4 M params) | $I$ | `--preset unet` |
+| 4 | U-Net, residual | $R = I - 128\,B_7 \in [0, 127]$, then $\hat I = 128\,B_7 + \hat R$ | `--preset unet-res` |
+
+All networks are trained with MSE on random 128×128 crops of **DIV2K** (800
+train images), validated on DIV2K-valid, and tested on **Kodak** (24 images).
+Every method, the fills included, gets **only the transmitted plane** through the
+same `Reconstructor` interface. Each is scored with PSNR, SSIM, LPIPS, MAE and
+**MSB consistency**, the fraction of pixels where Î doesn't contradict the
+transmitted $B_7$. Residual models are consistent by construction.
+
+```shell
+# 1. Data (once; ~4 GB download, resumable, reproducible via a manifest)
+python -m msbgen.cli.prepare_data div2k kodak
+
+# 2. Train (each run → runs/<name>/best.pt; Ctrl-C saves, --resume continues)
+python -m msbgen.cli.train --preset cnn
+python -m msbgen.cli.train --preset unet
+python -m msbgen.cli.train --preset unet-res
+
+# 3. Training curves (loss, PSNR, SSIM, LR) → outputs/plots/
+python -m msbgen.cli.plot_runs
+
+# 4. Evaluate on Kodak (tables, per-image CSV, comparison images)
+python -m msbgen.cli.evaluate data/processed/kodak --models runs/*/best.pt --lpips
+```
+
+Training logs its full history to `runs/<name>/log.jsonl`: training loss and PSNR,
+plus validation loss, PSNR, SSIM and gain over midpoint fill, starting at step 0.
+It also runs a **thermal guard**. When the GPU reaches 80 °C or the CPU 90 °C, it
+saves a checkpoint and pauses until both have cooled, which keeps a laptop from
+overheating and shutting down mid-run. See
+[msbgen/cli/README.md](msbgen/cli/README.md#train-train-a-baseline) for all options.
+
+Trained models show up automatically in the web app, in section **4 · Model
+reconstruction**, which sits next to the midpoint baseline. It has a toggle
+between reconstructions and error maps ($|I - \hat I| \times 4$), and the
+PSNR/SSIM/MAE/consistency for the uploaded image. Colour uploads are converted to
+grayscale for the models.
+
+Each training run takes roughly 1–1.5 h on the development laptop (GeForce MX350,
+2 GB) with the default sizes. Measured speeds and memory are in
+[msbgen/models/README.md](msbgen/models/README.md).
+
+**Results:** to be filled in from the Kodak evaluation once the training runs
+finish.
+
 ## Project structure
 
 ```shell
@@ -156,28 +212,46 @@ MSBGen/
 │   ├── core/              # Framework-independent logic (see core/README.md)
 │   │   ├── bitplanes.py   # slice_bitplanes, reconstruct_from_planes, binary_entropy
 │   │   ├── analysis.py    # context entropy, correlations, top-k reconstruction, analyze_image
+│   │   ├── reconstruction.py  # Reconstructor interface, constant fills, evaluate()
 │   │   ├── metrics.py     # PSNR, SSIM, MAE
 │   │   └── image_io.py    # decode uploads → grayscale/RGB uint8/uint16 arrays, PNG encoding
+│   ├── data/              # Dataset download/preparation + training crops (see data/README.md)
+│   ├── models/            # CNN / U-Net, checkpoints, ModelReconstructor, LPIPS (see models/README.md)
+│   ├── training.py        # training loop (validation vs midpoint fill, checkpoints, resume)
+│   ├── utils/             # gpu_guard / cpu_guard / thermal: pause training when too hot
 │   ├── cli/               # Command-line tools (see cli/README.md)
-│   │   └── analyze.py     # dataset-level analysis → CSV / JSON / plots
+│   │   ├── analyze.py     # dataset-level analysis → CSV / JSON / plots
+│   │   ├── prepare_data.py  # download + convert DIV2K / Kodak
+│   │   ├── train.py       # train a baseline
+│   │   ├── plot_runs.py   # training curves + history CSV
+│   │   └── evaluate.py    # score fills + checkpoints on a test set
 │   ├── api/
-│   │   ├── routes.py      # /api/health, /api/bitplanes, /api/analysis
+│   │   ├── routes.py      # /api/health, bitplanes, analysis, models, reconstruct
+│   │   ├── model_registry.py  # discovers runs/*/best.pt for the web app
 │   │   └── schemas.py     # Pydantic response models
 │   └── web/static/        # Front-end (plain HTML / CSS / JS, no build step)
 │       ├── index.html
 │       ├── css/styles.css
 │       └── js/app.js
-├── tests/                 # pytest suite (core, API, CLI)
+├── tests/                 # pytest suite (core, models, API, CLI)
+├── data/                  # datasets (git-ignored; created by prepare_data)
+├── runs/                  # training runs and checkpoints (git-ignored)
+├── outputs/               # analysis / evaluation outputs (git-ignored)
 ├── PLAN.md                # Research plan
 ├── requirements.txt
 └── README.md
 ```
 
-`msbgen.core` has no web dependencies, so the same bit-plane and metric code is
-shared by the web app, the CLI and (later) the dataset builders and training
-scripts. Module-level docs: [msbgen/core/README.md](msbgen/core/README.md)
-(bit-planes, analysis, metrics) and [msbgen/cli/README.md](msbgen/cli/README.md)
-(CLI options and output formats).
+`msbgen.core` has no web or torch dependencies, so the same bit-plane, metric and
+reconstruction code is shared by the web app, the CLIs and training. Module-level
+docs:
+
+- [msbgen/core/README.md](msbgen/core/README.md): bit-planes, analysis,
+  reconstructors, metrics
+- [msbgen/models/README.md](msbgen/models/README.md): networks, checkpoints, LPIPS
+- [msbgen/data/README.md](msbgen/data/README.md): datasets and preparation
+- [msbgen/cli/README.md](msbgen/cli/README.md): every command, its options and
+  output formats
 
 ## Getting started
 
@@ -187,7 +261,8 @@ Requires Python 3.10+.
 # 1. Activate your environment (or create one: python -m venv ~/venv)
 source ~/venv/bin/activate
 
-# 2. Install dependencies
+# 2. Install dependencies (for a CUDA build of PyTorch, install torch first
+#    following https://pytorch.org/get-started/)
 pip install -r requirements.txt
 
 # 3. Run the app (from the project root)
@@ -206,6 +281,8 @@ To make it reachable from other machines on your network:
 | --- | --- | --- |
 | `MSBGEN_MAX_UPLOAD_MB` | `25` | Maximum upload size |
 | `MSBGEN_MAX_PIXELS` | `16777216` (4096²) | Maximum image area |
+| `MSBGEN_MODELS_DIR` | `runs` | Where the web app looks for `<run>/best.pt` checkpoints |
+| `MSBGEN_DEVICE` | auto | Device for model inference (`cuda`, `cpu`, …) |
 
 ### Tests
 
@@ -279,6 +356,36 @@ Same upload as `/api/bitplanes`. Returns the same image fields (`filename`,
 midpoint-fill reconstruction as an 8-bit PNG. JSON has no infinity, so the
 lossless PSNR (k = `bit_depth`) is `null`. SSIM is `null` for images smaller than
 11×11, and correlations involving a constant plane are `null`.
+
+### `GET /api/models`
+
+The trained checkpoints found in `MSBGEN_MODELS_DIR`:
+`{"torch_available", "models_dir", "models": [{"name", "label", "arch", "output", "k", "bit_depth", "channels", "parameters", "step", "val_psnr", "val_gain_db"}]}`.
+The list is re-scanned on every call, so new runs appear without a restart.
+
+### `POST /api/reconstruct`
+
+Multipart `file`, plus optional form fields `k` (default 1) and `models`
+(comma-separated names; default: every compatible model). The image must be
+8-bit; colour images are converted to grayscale, with a note. Returns the image
+fields plus:
+
+```json
+{
+  "k": 1,
+  "original": "data:image/png;base64,...",
+  "results": [
+    { "name": "mid", "label": "Midpoint fill", "kind": "fill",
+      "psnr": 17.29, "ssim": 0.635, "mae": 30.66, "msb_consistency": 1.0,
+      "psnr_gain": 0.0, "image": "data:...", "error_map": "data:..." },
+    { "name": "unet-res", "label": "U-Net (residual)", "kind": "model", "...": "..." }
+  ]
+}
+```
+
+Fills come first, then models. `psnr_gain` is relative to midpoint fill, and
+`error_map` is $|I - \hat I| \times 4$. Errors: `400` for non-8-bit input or an
+invalid `k`, and `404` for an unknown model name.
 
 ### `GET /api/health`
 

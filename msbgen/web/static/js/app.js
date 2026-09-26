@@ -2,6 +2,8 @@
 
 const API_BITPLANES = "/api/bitplanes";
 const API_ANALYSIS = "/api/analysis";
+const API_MODELS = "/api/models";
+const API_RECONSTRUCT = "/api/reconstruct";
 const CHANNEL_COLORS = { R: "var(--ch-r)", G: "var(--ch-g)", B: "var(--ch-b)", L: "var(--ch-gray)" };
 const FILL_SERIES = [
   { fill: "mid", name: "Midpoint fill", color: "var(--series-mid)", dashed: false },
@@ -42,6 +44,13 @@ const el = {
   entropyTable: $("#entropy-table"),
   corrChart: $("#corr-chart"),
   corrReadout: $("#corr-readout"),
+  models: $("#models"),
+  modelsSummary: $("#models-summary"),
+  modelsStatus: $("#models-status"),
+  modelsBody: $("#models-body"),
+  modelsView: $("#models-view"),
+  modelsGrid: $("#models-grid"),
+  modelsTable: $("#models-table"),
   lightbox: $("#lightbox"),
   lbTitle: $("#lightbox-title"),
   lbImg: $("#lightbox-img"),
@@ -55,6 +64,8 @@ let previewUrl = null;
 let requestId = 0; // ignore responses that arrive after the user picked another file
 let analysisData = null;
 let recMetric = "psnr";
+let availableModels = null; // from /api/models, fetched once at start-up
+let modelTiles = []; // { tile, img, image, error } for the reconstruction / error toggle
 
 // ---------- Theme ----------
 function initTheme() {
@@ -118,7 +129,9 @@ function setLoading(on) {
 function hideResults() {
   el.results.hidden = true;
   el.analysis.hidden = true;
+  el.models.hidden = true;
   analysisData = null;
+  modelTiles = [];
 }
 
 // ---------- File selection ----------
@@ -209,9 +222,12 @@ async function slice() {
   hideResults();
   setLoading(true);
 
-  // Both requests start together; the planes usually arrive first and render straight away.
+  // All requests start together; the planes usually arrive first and render straight away.
   const analysis = postImage(API_ANALYSIS, file);
   analysis.catch(() => {}); // handled below; avoids an unhandled-rejection warning if slicing fails
+  const models = await modelsPromise;
+  const reconstruction = models.length ? postImage(API_RECONSTRUCT, file) : null;
+  reconstruction?.catch(() => {});
   try {
     const data = await postImage(API_BITPLANES, file);
     if (id !== requestId) return;
@@ -224,12 +240,116 @@ async function slice() {
   }
 
   showAnalysisStatus("Analysing bit-planes…", true);
-  try {
-    const data = await analysis;
-    if (id === requestId) renderAnalysis(data);
-  } catch (err) {
-    if (id === requestId) showAnalysisStatus(`Analysis failed: ${err.message || err}`, false);
-  }
+  if (reconstruction) showModelsStatus("Running models…", true);
+  else showNoModels();
+  await Promise.all([
+    analysis.then(
+      (data) => id === requestId && renderAnalysis(data),
+      (err) => id === requestId && showAnalysisStatus(`Analysis failed: ${err.message || err}`, false),
+    ),
+    reconstruction?.then(
+      (data) => id === requestId && renderModels(data),
+      (err) => id === requestId && showModelsStatus(`Model reconstruction unavailable: ${err.message || err}`, false),
+    ),
+  ]);
+}
+
+// ---------- Models ----------
+const modelsPromise = fetch(API_MODELS)
+  .then((res) => (res.ok ? res.json() : { models: [] }))
+  .then((data) => (availableModels = data).models)
+  .catch(() => []);
+
+function showModelsStatus(message, busy) {
+  el.models.hidden = false;
+  el.modelsBody.hidden = true;
+  el.modelsSummary.textContent = "";
+  el.modelsStatus.hidden = false;
+  el.modelsStatus.classList.toggle("error-text", !busy);
+  el.modelsStatus.querySelector(".spinner").hidden = !busy;
+  el.modelsStatus.querySelector(".status-text").textContent = message;
+}
+
+function showNoModels() {
+  showModelsStatus("", false);
+  el.modelsStatus.classList.remove("error-text");
+  const reason = availableModels?.torch_available === false
+    ? "PyTorch is not installed, so trained models can't run. "
+    : `No trained models found in ${availableModels?.models_dir ?? "runs"}/. `;
+  el.modelsStatus.querySelector(".status-text").innerHTML =
+    `${escapeHtml(reason)}Train one with <code>python -m msbgen.cli.train --preset unet-res</code>.`;
+}
+
+function renderModels(data) {
+  el.modelsStatus.hidden = true;
+  el.modelsBody.hidden = false;
+  const ratio = `${data.width} / ${data.height}`;
+  const stem = fileStem(data.filename);
+  const n = 8;
+  const bits = data.k === 1 ? `B${n - 1}` : `B${n - 1}…B${n - data.k}`;
+  const models = data.results.filter((r) => r.kind === "model");
+  const scored = data.results.filter((r) => r.psnr != null);
+  const best = scored.reduce((a, b) => (b.psnr > a.psnr ? b : a), scored[0]);
+  const top = models.reduce((a, b) => (b.psnr > (a?.psnr ?? -Infinity) ? b : a), null);
+  el.modelsSummary.textContent = top
+    ? `Best model: ${top.label} (${top.name}) · PSNR ${top.psnr.toFixed(2)} dB, ${gainText(top.psnr_gain)} vs midpoint fill.`
+    : "";
+  modelTiles = [];
+  el.modelsView.querySelector('[data-view="image"]').click(); // start on the reconstructions
+  const original = { name: "original", label: "Original", image: data.original, error_map: null };
+  const tiles = [original, ...data.results].map((r) => {
+    const isOriginal = r === original;
+    const stats = isOriginal ? `grayscale, ${data.width} × ${data.height}` :
+      `PSNR ${fmt(r.psnr, 2)} dB${r.kind === "model" ? ` (${gainText(r.psnr_gain)})` : ""} · SSIM ${fmt(r.ssim)}`;
+    const tile = {
+      image: r.image,
+      label: r.label,
+      side: isOriginal ? "reference" : r.kind === "model" ? r.name : `from ${bits}`,
+      tag: r === best ? "best" : "",
+      highlight: false,
+      stats,
+      title: isOriginal ? "Original (grayscale)" : `${r.label} — from ${bits} only`,
+      caption: isOriginal ? "The image every method is compared against." :
+        `${stats} · MAE ${r.mae.toFixed(2)} · MSB consistency ${pct(r.msb_consistency)}.`,
+      download: `${stem}_${r.name}.png`,
+    };
+    const node = renderTile(tile, ratio);
+    if (r === best) node.classList.add("best");
+    modelTiles.push({ tile, img: node.querySelector("img"), image: r.image, error: r.error_map });
+    return node;
+  });
+  el.modelsGrid.replaceChildren(...tiles);
+
+  const rows = data.results.map((r) => {
+    const gain = r.kind === "model" || r.name === "zero" ? gainText(r.psnr_gain, true) : "—";
+    return `<tr><td>${escapeHtml(r.label)}${r.kind === "model" ? ` <span class="hint">${escapeHtml(r.name)}</span>` : ""}</td>` +
+      `<td>${r.kind === "model" ? "model" : "baseline"}</td><td>${fmt(r.psnr, 2)}</td><td>${gain}</td>` +
+      `<td>${fmt(r.ssim, 4)}</td><td>${r.mae.toFixed(2)}</td><td>${pct(r.msb_consistency)}</td></tr>`;
+  });
+  el.modelsTable.innerHTML = `<thead><tr><th>Method</th><th>Kind</th><th>PSNR (dB)</th><th>Δ vs midpoint</th>` +
+    `<th>SSIM</th><th>MAE</th><th>MSB consistency</th></tr></thead><tbody>${rows.join("")}</tbody>`;
+}
+
+function gainText(g, html = false) {
+  if (g == null) return "—";
+  const text = `${g >= 0 ? "+" : "−"}${Math.abs(g).toFixed(2)} dB`;
+  return html ? `<span class="${g >= 0 ? "gain-pos" : "gain-neg"}">${text}</span>` : text;
+}
+
+const escapeHtml = (s) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
+function initModelsView() {
+  el.modelsView.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-view]");
+    if (!btn) return;
+    for (const b of el.modelsView.querySelectorAll("button")) b.setAttribute("aria-pressed", String(b === btn));
+    const showError = btn.dataset.view === "error";
+    for (const t of modelTiles) {
+      const src = showError && t.error ? t.error : t.image;
+      t.img.src = src;
+      t.tile.image = src;
+    }
+  });
 }
 
 // ---------- Bit-plane rendering ----------
@@ -716,5 +836,6 @@ initTheme();
 initDropzone();
 initLightbox();
 initRecMetric();
+initModelsView();
 el.sliceBtn.addEventListener("click", slice);
 el.clearBtn.addEventListener("click", clearAll);

@@ -6,7 +6,7 @@ import base64
 import math
 
 import numpy as np
-from fastapi import APIRouter, HTTPException, UploadFile, status
+from fastapi import APIRouter, Form, HTTPException, UploadFile, status
 from starlette.concurrency import run_in_threadpool
 
 from msbgen import __version__
@@ -19,11 +19,17 @@ from msbgen.api.schemas import (
     Correlation,
     FillScores,
     ImageInfo,
+    MethodResult,
+    ModelInfo,
+    ModelsResponse,
     PlaneAnalysis,
     Reconstruction,
+    ReconstructResponse,
 )
+from msbgen.api import model_registry
 from msbgen.config import settings
 from msbgen.core import (
+    FILL_RECONSTRUCTORS,
     ImageDecodeError,
     LoadedImage,
     analyze_image,
@@ -33,9 +39,14 @@ from msbgen.core import (
     encode_rgb_bits_png,
     load_image,
     msb_reconstruction,
+    reconstruct_and_evaluate,
+    round_estimate,
     slice_bitplanes,
+    to_grayscale,
     to_preview,
 )
+
+ERROR_MAP_GAIN = 4  # |I - Î| is multiplied by this so small errors are visible
 
 router = APIRouter(prefix="/api", tags=["api"])
 
@@ -189,3 +200,76 @@ async def analysis(file: UploadFile) -> AnalysisResponse:
     inter-plane correlation, and quality of reconstructions from the top k planes."""
     loaded = await _load_upload(file)
     return await run_in_threadpool(_build_analysis, loaded, file.filename)
+
+
+def _model_info(m) -> ModelInfo:
+    c = m.config
+    return ModelInfo(
+        name=m.name, label=m.label, arch=c.arch, output=c.output, k=c.k, bit_depth=c.bit_depth,
+        channels=c.channels, parameters=m.model.num_parameters(), step=m.step,
+        val_psnr=_finite(m.metrics.get("val_psnr")), val_gain_db=_finite(m.metrics.get("val_gain_db")),
+    )
+
+
+@router.get("/models", response_model=ModelsResponse)
+async def models() -> ModelsResponse:
+    """Trained reconstruction models found in MSBGEN_MODELS_DIR (default `runs/`)."""
+    found = await run_in_threadpool(model_registry.list_models)
+    return ModelsResponse(
+        torch_available=model_registry.torch_available(),
+        models_dir=str(settings.models_dir),
+        models=[_model_info(m) for m in found],
+    )
+
+
+def _build_reconstruction(loaded: LoadedImage, filename: str | None, k: int, names: list[str] | None) -> ReconstructResponse:
+    n = loaded.bit_depth
+    if n != 8:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Models work on 8-bit images; this one is {n}-bit.")
+    if not 1 <= k < n:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"k must be between 1 and {n - 1}.")
+    info = _image_info(loaded, filename)
+    image = loaded.array
+    if loaded.color_mode == "RGB":
+        image = to_grayscale(image)
+        info["notes"] = [*info["notes"], "Converted to grayscale: the baselines are trained on 8-bit grayscale."]
+    image = image[..., 0]
+
+    available = [m for m in model_registry.list_models() if m.supports(k, n, 1)]
+    if names:
+        unknown = set(names) - {m.name for m in available}
+        if unknown:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"No compatible model named {', '.join(sorted(unknown))}.")
+        available = [m for m in available if m.name in names]
+
+    results: list[MethodResult] = []
+    methods = [(r, "fill") for r in FILL_RECONSTRUCTORS.values()] + [(m, "model") for m in available]
+    for method, kind in methods:
+        if kind == "model":
+            with model_registry.inference_lock():
+                estimate, scores = reconstruct_and_evaluate(method, image, k, n)
+        else:
+            estimate, scores = reconstruct_and_evaluate(method, image, k, n)
+        error = np.clip(np.abs(image.astype(np.float64) - estimate) * ERROR_MAP_GAIN, 0, 255).astype(np.uint8)
+        results.append(MethodResult(
+            name=method.name, label=method.label, kind=kind,
+            psnr=_finite(scores["psnr"]), ssim=_finite(scores["ssim"]), mae=scores["mae"],
+            msb_consistency=scores["msb_consistency"],
+            psnr_gain=None,
+            image=_data_url(encode_png(round_estimate(estimate, n))),
+            error_map=_data_url(encode_png(error)),
+        ))
+    mid = next(r.psnr for r in results if r.name == "mid")
+    for r in results:
+        r.psnr_gain = r.psnr - mid if r.psnr is not None and mid is not None else None
+    info["color_mode"], info["channels"] = "L", [Channel(name="L", label="Gray").model_dump()]
+    return ReconstructResponse(**info, k=k, original=_data_url(encode_png(image)), results=results)
+
+
+@router.post("/reconstruct", response_model=ReconstructResponse)
+async def reconstruct(file: UploadFile, k: int = Form(1), models: str | None = Form(None)) -> ReconstructResponse:
+    """Reconstruct the image from its top k planes with the constant fills and every compatible
+    trained model (or only `models`, comma-separated). Colour images are converted to grayscale."""
+    loaded = await _load_upload(file)
+    names = [m.strip() for m in models.split(",") if m.strip()] if models else None
+    return await run_in_threadpool(_build_reconstruction, loaded, file.filename, k, names)

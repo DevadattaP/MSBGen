@@ -12,6 +12,7 @@ from msbgen.core import analyze_image, msb_reconstruction, psnr, ssim, load_imag
 | --- | --- |
 | [`bitplanes.py`](bitplanes.py) | Split images into bit-planes and put them back together |
 | [`analysis.py`](analysis.py) | Information content of planes: entropy, correlation, top-k reconstruction |
+| [`reconstruction.py`](reconstruction.py) | The `Reconstructor` interface, constant fills, `evaluate` (scores any Î) |
 | [`metrics.py`](metrics.py) | Full-reference quality metrics: PSNR, SSIM, MAE, MSE |
 | [`image_io.py`](image_io.py) | Decode files to grayscale / RGB arrays, PNG encoding helpers |
 
@@ -155,6 +156,52 @@ psnr(img, est, 255)
 For uniformly distributed pixels the midpoint fill has
 $\text{MSE} = (4^{n-k}-1)/12$. A test checks this, and it gives a useful point of
 reference: each extra plane adds about 6 dB.
+
+## Reconstructors (`reconstruction.py`)
+
+Everything that produces Î goes through one interface, so the constant baselines
+and every trained model are scored identically:
+
+```python
+class Reconstructor(ABC):
+    name: str      # short id: "zero", "mid", or a run name such as "unet-res"
+    label: str     # "Midpoint fill", "U-Net (residual)", …
+    def supports(self, k, bit_depth, channels) -> bool: ...
+    def reconstruct(self, top, k, bit_depth) -> np.ndarray: ...   # float64 Î
+```
+
+**The receiver rule.** `reconstruct` gets `top`, the image with every bit below the
+top k set to zero, i.e. $\sum_{\text{top }k} 2^j B_j$. It never gets the original.
+This makes it impossible for a method to use information the receiver wouldn't
+have (a test checks it).
+
+| Name | Function | Returns |
+| --- | --- | --- |
+| | `keep_top_bits(image, k, bit_depth=None)` | What the receiver has: `image` with the lower n−k bits zeroed (same dtype) |
+| `zero` | `ZeroFill` | `top` as float (truncation) |
+| `mid` | `MidpointFill` | `top` + (2^(n−k) − 1)/2, e.g. 128·B7 + 63.5 |
+| | `FILL_RECONSTRUCTORS` | `{"zero": ZeroFill(), "mid": MidpointFill()}` |
+| | `evaluate(reference, estimate, k, bit_depth, with_ssim=True)` | `{"psnr", "ssim", "mae", "msb_consistency"}` |
+| | `reconstruct_and_evaluate(reconstructor, image, k, …)` | Applies the receiver rule, runs the method, scores it: `(estimate, scores)` |
+| | `msb_consistency(reference, estimate, k, bit_depth)` | Fraction of pixels whose *rounded* estimate keeps the transmitted top k bits |
+| | `round_estimate(estimate, bit_depth)` | Round half up and clip; what you would store or display |
+
+```python
+from msbgen.core import FILL_RECONSTRUCTORS, reconstruct_and_evaluate
+
+estimate, scores = reconstruct_and_evaluate(FILL_RECONSTRUCTORS["mid"], gray, k=1)
+scores   # {"psnr": 17.0, "ssim": 0.58, "mae": 31.8, "msb_consistency": 1.0}
+```
+
+**MSB consistency** checks something the quality metrics don't: whether the
+reconstruction contradicts the data the receiver actually got. If $B_7 = 1$ (value
+≥ 128) but the model outputs 120, the output is inconsistent with the transmission.
+The fills and residual-mode models are consistent by construction (1.0), while
+models that predict the whole image can fall below 1.
+
+Trained networks implement the same interface in
+[`msbgen.models.ModelReconstructor`](../models/README.md#modelreconstructor).
+`msb_reconstruction` (above) is a shortcut for the two fills.
 
 ## Metrics (`metrics.py`)
 
@@ -334,3 +381,5 @@ the helpers `width`, `height`, `channel_names` and `channel_labels`.
 - [`tests/test_analysis.py`](../../tests/test_analysis.py): metrics (including the
   scikit-image SSIM check), entropy and correlation on known patterns, fills, and
   the uniform-MSE theory
+- [`tests/test_reconstruction.py`](../../tests/test_reconstruction.py): the receiver
+  rule, fills, rounding, MSB consistency and `evaluate`

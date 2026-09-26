@@ -10,6 +10,12 @@ opencv-python>=4.8   # 16-bit colour PNG/TIFF decoding, fast SSIM
 
 # Analysis
 matplotlib>=3.8     # plots from `python -m msbgen.cli.analyze --plots`
+tqdm>=4.66          # download progress bars (optional)
+
+# Models (baselines). For a CUDA build of torch, follow https://pytorch.org/get-started/
+torch>=2.2
+lpips>=0.1.4        # perceptual metric in `python -m msbgen.cli.evaluate --lpips`
+psutil>=5.9         # CPU temperature for the thermal guard
 
 # Development / testing
 pytest>=8.0

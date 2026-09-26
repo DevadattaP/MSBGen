@@ -24,6 +24,7 @@ import numpy as np
 
 from msbgen.core.bitplanes import binary_entropy, infer_bit_depth, slice_bitplanes
 from msbgen.core.metrics import mae, psnr, ssim
+from msbgen.core.reconstruction import FILL_RECONSTRUCTORS, keep_top_bits
 
 FILLS = ("zero", "mid")
 CORRELATION_CHUNK = 1 << 20  # pixels per chunk; bounds memory for the plane×plane matrix
@@ -130,15 +131,9 @@ def msb_reconstruction(image: np.ndarray, k: int, fill: str = "mid", bit_depth: 
         bit_depth: n; defaults to the dtype's width.
     """
     n = infer_bit_depth(image) if bit_depth is None else bit_depth
-    if not 1 <= k <= n:
-        raise ValueError(f"k must be in 1..{n}, got {k}")
     if fill not in FILLS:
         raise ValueError(f"fill must be one of {FILLS}, got {fill!r}")
-    drop = n - k
-    top = ((image.astype(np.uint32) >> drop) << drop).astype(np.float64)
-    if fill == "mid":
-        top += ((1 << drop) - 1) / 2
-    return top
+    return FILL_RECONSTRUCTORS[fill].reconstruct(keep_top_bits(image, k, n), k, n)
 
 
 def analyze_image(image: np.ndarray, bit_depth: int | None = None, with_ssim: bool = True) -> ImageAnalysis:

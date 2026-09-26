@@ -27,8 +27,28 @@ from msbgen.core.image_io import (
     to_preview,
 )
 from msbgen.core.metrics import mae, mse, psnr, ssim
+from msbgen.core.reconstruction import (
+    FILL_RECONSTRUCTORS,
+    MidpointFill,
+    Reconstructor,
+    ZeroFill,
+    evaluate,
+    keep_top_bits,
+    msb_consistency,
+    reconstruct_and_evaluate,
+    round_estimate,
+)
 
 __all__ = [
+    "FILL_RECONSTRUCTORS",
+    "MidpointFill",
+    "Reconstructor",
+    "ZeroFill",
+    "evaluate",
+    "keep_top_bits",
+    "msb_consistency",
+    "reconstruct_and_evaluate",
+    "round_estimate",
     "ImageAnalysis",
     "ImageDecodeError",
     "LoadedImage",
