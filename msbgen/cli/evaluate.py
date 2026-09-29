@@ -1,4 +1,4 @@
-"""Evaluate reconstructors (constant fills + trained checkpoints) on a test set.
+"""Evaluate reconstructors (zero / mid / random fills + trained checkpoints) on a test set.
 
     python -m msbgen.cli.evaluate data/processed/kodak --models runs/*/best.pt --lpips
 
@@ -69,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("data", type=Path, help="folder of prepared .npy files or images")
     p.add_argument("--models", nargs="*", type=Path, default=[], help="checkpoints (e.g. runs/*/best.pt)")
     p.add_argument("--k", type=int, default=1, help="transmitted planes (default 1)")
-    p.add_argument("--fills", nargs="*", default=list(FILL_RECONSTRUCTORS), help="constant fills to include")
+    p.add_argument("--fills", nargs="*", default=list(FILL_RECONSTRUCTORS), help="fill baselines to include (default: zero mid random)")
     p.add_argument("--lpips", action="store_true", help="also compute LPIPS (needs `lpips`)")
     p.add_argument("--no-ssim", action="store_true")
     p.add_argument("--limit", type=int, help="evaluate only the first N images")

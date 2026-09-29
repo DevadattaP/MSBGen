@@ -66,6 +66,7 @@ class PlaneAnalysis(BaseModel):
 class FillScores(BaseModel):
     zero: float | None = Field(description="Missing bits set to 0 (truncation)")
     mid: float | None = Field(description="Missing bits set to the middle of their range")
+    random: float | None = Field(description="Missing bits drawn uniformly at random (fixed seed)")
 
 
 class Reconstruction(BaseModel):
@@ -113,7 +114,7 @@ class ModelsResponse(BaseModel):
 class MethodResult(BaseModel):
     name: str
     label: str
-    kind: str = Field(description="'fill' (constant baseline) or 'model'")
+    kind: str = Field(description="'fill' (no-model baseline: zero, mid or random) or 'model'")
     psnr: float | None = Field(description="dB; null means identical")
     ssim: float | None
     mae: float
@@ -126,4 +127,4 @@ class MethodResult(BaseModel):
 class ReconstructResponse(ImageInfo):
     k: int
     original: str = Field(description="The image that was reconstructed (grayscale), as a PNG data URL")
-    results: list[MethodResult] = Field(description="Constant fills first, then models")
+    results: list[MethodResult] = Field(description="Fills first (zero, mid, random), then models")

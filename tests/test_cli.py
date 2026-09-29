@@ -31,7 +31,8 @@ def test_cli_groups_by_mode(tmp_path, capsys):
     assert len(groups["RGB-8"]["correlation"]["matrix"]) == 24
     recs = groups["L-8"]["reconstructions"]
     assert [r["k"] for r in recs] == list(range(1, 9))
-    assert recs[-1]["psnr_mid"] is None and recs[-1]["lossless_images"] == 1
+    assert recs[-1]["psnr_mid"] is None and recs[-1]["psnr_random"] is None and recs[-1]["lossless_images"] == 1
+    assert recs[0]["psnr_mid"] > recs[0]["psnr_random"] > recs[0]["psnr_zero"]
 
     with (out / "reconstruction.csv").open() as f:
         rows = list(csv.DictReader(f))

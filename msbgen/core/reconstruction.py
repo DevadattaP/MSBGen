@@ -4,7 +4,7 @@ The receiver only has the k most-significant planes. A `Reconstructor` therefore
 never sees the original image: it gets `top`, the image with every bit below the
 top k set to zero (equivalently, Σ_{top k} 2^j B_j), and returns an estimate Î.
 
-The constant fills below are the no-model baselines; trained networks implement the
+The fills below (zero, midpoint, random) are the no-model baselines; trained networks implement the
 same interface (see `msbgen.models.ModelReconstructor`), so every method is scored
 by the same `evaluate` function.
 """
@@ -62,7 +62,26 @@ class MidpointFill(Reconstructor):
         return top.astype(np.float64) + ((1 << (bit_depth - k)) - 1) / 2
 
 
-FILL_RECONSTRUCTORS: dict[str, Reconstructor] = {r.name: r for r in (ZeroFill(), MidpointFill())}
+class RandomFill(Reconstructor):
+    """Missing bits drawn uniformly at random: 128·B7 + U{0, …, 127} for n = 8, k = 1.
+
+    A sample from the uniform prior over the missing range, i.e. the no-model version of
+    a generative reconstruction. For uniform pixels its MSE is (4^(n-k) - 1)/6, exactly
+    twice the midpoint fill's (3.01 dB lower PSNR). The noise comes from a fixed `seed`,
+    so the same input always gives the same output.
+    """
+
+    name, label = "random", "Random fill"
+
+    def __init__(self, seed: int = 0):
+        self.seed = seed
+
+    def reconstruct(self, top, k, bit_depth):
+        rng = np.random.default_rng(self.seed)
+        return top.astype(np.float64) + rng.integers(0, 1 << (bit_depth - k), size=top.shape)
+
+
+FILL_RECONSTRUCTORS: dict[str, Reconstructor] = {r.name: r for r in (ZeroFill(), MidpointFill(), RandomFill())}
 
 
 def round_estimate(estimate: np.ndarray, bit_depth: int) -> np.ndarray:

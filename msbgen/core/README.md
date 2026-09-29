@@ -12,7 +12,7 @@ from msbgen.core import analyze_image, msb_reconstruction, psnr, ssim, load_imag
 | --- | --- |
 | [`bitplanes.py`](bitplanes.py) | Split images into bit-planes and put them back together |
 | [`analysis.py`](analysis.py) | Information content of planes: entropy, correlation, top-k reconstruction |
-| [`reconstruction.py`](reconstruction.py) | The `Reconstructor` interface, constant fills, `evaluate` (scores any Î) |
+| [`reconstruction.py`](reconstruction.py) | The `Reconstructor` interface, fills (zero / mid / random), `evaluate` (scores any Î) |
 | [`metrics.py`](metrics.py) | Full-reference quality metrics: PSNR, SSIM, MAE, MSE |
 | [`image_io.py`](image_io.py) | Decode files to grayscale / RGB arrays, PNG encoding helpers |
 
@@ -85,7 +85,7 @@ a.reconstructions               # list[ReconstructionStats], k = 1 … n
 | `k` | Number of most-significant planes kept |
 | `bits_per_pixel` | Raw cost, `k × C` |
 | `coded_bpp` | Sum of `context_entropy` over the kept planes and channels |
-| `psnr`, `ssim`, `mae` | Dicts keyed by fill, `{"zero": …, "mid": …}` |
+| `psnr`, `ssim`, `mae` | Dicts keyed by fill, `{"zero": …, "mid": …, "random": …}` |
 
 `psnr` is `inf` for a lossless reconstruction (always the case at `k = n`). `ssim`
 is `None` when `with_ssim=False` or the image is smaller than 11×11. SSIM is by far
@@ -143,6 +143,7 @@ Keeps the top `k` planes and fills in the missing $n-k$ bits:
 | --- | --- | --- |
 | `"zero"` | $\sum_{j=n-k}^{n-1} 2^j B_j$ | Truncation; always too dark on average |
 | `"mid"` | zero fill $+ \frac{2^{n-k}-1}{2}$ | Centre of the missing range. MSE-optimal if the missing bits are uniform. For n = 8, k = 1 this is the baseline $128\,B_7 + 63.5$. |
+| `"random"` | zero fill $+ U\{0, \dots, 2^{n-k}-1\}$ | Missing bits drawn uniformly per pixel (fixed seed 0, so repeatable). A sample from a uniform prior: the no-model counterpart of a generative reconstruction. |
 
 It returns **float64 without rounding**, so the metrics score exactly
 $128\,B_7 + 63.5$. Round only for display, as the API does with round-half-up. It
@@ -157,6 +158,14 @@ For uniformly distributed pixels the midpoint fill has
 $\text{MSE} = (4^{n-k}-1)/12$. A test checks this, and it gives a useful point of
 reference: each extra plane adds about 6 dB.
 
+The random fill is an independent draw from the same range, so its error is the
+difference of two independent uniforms: $\text{MSE} = (4^{n-k}-1)/6$, exactly
+twice the midpoint fill's, or **3.01 dB lower PSNR** (also tested). The same
+factor of 2 holds in general: a sample from any posterior has twice the MSE of
+that posterior's mean. That is why a good generative model is expected to score
+about 3 dB *below* the best deterministic model on PSNR, and why the random fill
+is the right no-model reference for it.
+
 ## Reconstructors (`reconstruction.py`)
 
 Everything that produces Î goes through one interface, so the constant baselines
@@ -164,7 +173,7 @@ and every trained model are scored identically:
 
 ```python
 class Reconstructor(ABC):
-    name: str      # short id: "zero", "mid", or a run name such as "unet-res"
+    name: str      # short id: "zero", "mid", "random", or a run name such as "unet-res"
     label: str     # "Midpoint fill", "U-Net (residual)", …
     def supports(self, k, bit_depth, channels) -> bool: ...
     def reconstruct(self, top, k, bit_depth) -> np.ndarray: ...   # float64 Î
@@ -180,7 +189,8 @@ have (a test checks it).
 | | `keep_top_bits(image, k, bit_depth=None)` | What the receiver has: `image` with the lower n−k bits zeroed (same dtype) |
 | `zero` | `ZeroFill` | `top` as float (truncation) |
 | `mid` | `MidpointFill` | `top` + (2^(n−k) − 1)/2, e.g. 128·B7 + 63.5 |
-| | `FILL_RECONSTRUCTORS` | `{"zero": ZeroFill(), "mid": MidpointFill()}` |
+| `random` | `RandomFill(seed=0)` | `top` + uniform random integers in [0, 2^(n−k) − 1]; same input → same output |
+| | `FILL_RECONSTRUCTORS` | `{"zero": ZeroFill(), "mid": MidpointFill(), "random": RandomFill()}` |
 | | `evaluate(reference, estimate, k, bit_depth, with_ssim=True)` | `{"psnr", "ssim", "mae", "msb_consistency"}` |
 | | `reconstruct_and_evaluate(reconstructor, image, k, …)` | Applies the receiver rule, runs the method, scores it: `(estimate, scores)` |
 | | `msb_consistency(reference, estimate, k, bit_depth)` | Fraction of pixels whose *rounded* estimate keeps the transmitted top k bits |
@@ -201,7 +211,7 @@ models that predict the whole image can fall below 1.
 
 Trained networks implement the same interface in
 [`msbgen.models.ModelReconstructor`](../models/README.md#modelreconstructor).
-`msb_reconstruction` (above) is a shortcut for the two fills.
+`msb_reconstruction` (above) is a shortcut for the three fills.
 
 ## Metrics (`metrics.py`)
 
@@ -307,8 +317,10 @@ For the scikit-image "astronaut" photo (RGB, 8-bit):
 | Top k | Fill | PSNR (dB) | SSIM | MAE |
 | --- | --- | ---: | ---: | ---: |
 | 1 | midpoint | **16.3** | **0.505** | **33.1** |
+| 1 | random | 13.5 | 0.121 | 44.0 |
 | 1 | zero | 11.9 | 0.468 | 53.2 |
 | 4 | midpoint | **34.1** | 0.823 | **4.4** |
+| 4 | random | 31.5 | 0.739 | 5.6 |
 | 4 | zero | 29.9 | **0.886** | 6.5 |
 
 - Midpoint fill always wins on PSNR and MAE, because it minimises the error
@@ -317,9 +329,13 @@ For the scikit-image "astronaut" photo (RGB, 8-bit):
   luminance term, and that term is evaluated window by window. Inside a small
   window the missing bits are often nearly constant rather than spread uniformly,
   so one global "midpoint" offset is not the best *local* guess.
+- Random fill lands between the two on PSNR and MAE, but has by far the worst SSIM
+  at k = 1. Per-pixel noise has no structure, so SSIM's structure term collapses.
+  Realistic *texture* is not the same as random values: a generative model has to
+  produce structure that is correlated across neighbouring pixels.
 
 The metrics measure different things, and a single number can mislead. This is
-why the analysis reports all three for both fills, and why PLAN.md warns against
+why the analysis reports all three for every fill, and why PLAN.md warns against
 relying on PSNR alone. Generative models make this worse, because sharp invented
 detail typically lowers PSNR while raising perceived quality. LPIPS (a learned
 perceptual distance) and FID (realism over a whole dataset) will cover that. They

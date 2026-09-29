@@ -108,7 +108,7 @@ def test_train_and_resume(tmp_path):
     assert [r["step"] for r in vals] == [0, 3, 6]  # step 0 = untrained model
     assert [r["step"] for r in trains] == [3, 6]
     for r in vals:
-        assert {"epoch", "val_loss", "val_ssim", "val_ssim_mid", "val_gain_db"} <= set(r)
+        assert {"epoch", "val_loss", "val_ssim", "val_ssim_mid", "val_ssim_random", "val_psnr_random", "val_gain_db"} <= set(r)
         assert r["val_msb_consistency"] == 1.0  # residual output
     assert trains[0]["train_psnr"] > 0 and 0 < trains[0]["epoch"] < trains[1]["epoch"]
 
@@ -144,7 +144,7 @@ def test_evaluate_cli(tmp_path, capsys):
     assert main([str(data), "--models", str(tmp_path / "runs" / "u" / "best.pt"), "--out", str(out),
                  "--save-images", "1", "--device", "cpu"]) == 0
     summary = json.loads((out / "summary.json").read_text())
-    assert list(summary["methods"]) == ["zero", "mid", "u"]
+    assert list(summary["methods"]) == ["zero", "mid", "random", "u"]
     assert summary["methods"]["u"]["msb_consistency"]["mean"] == 1.0
     assert summary["methods"]["mid"]["lpips"] is None
     assert (out / "images" / "img0_compare.png").exists() and (out / "images" / "img0_u.png").exists()

@@ -27,7 +27,7 @@ research questions and milestones.
 | --- | --- |
 | Bit-plane explorer web app (slice & visualise planes) | ✅ done |
 | Bit-plane analysis (entropy, correlations, k-MSB reconstruction) | ✅ done |
-| Deterministic baselines (CNN / U-Net, residual prediction) | 🚧 code done, training runs in progress |
+| Deterministic baselines (CNN / U-Net, residual prediction) | ✅ done: [results](#results-kodak) |
 | Conditional diffusion / flow matching / normalizing flow | ⏳ |
 | Multi-MSB experiments, entropy coding, final codec | ⏳ |
 
@@ -87,16 +87,22 @@ after slicing) and over whole datasets from the command line.
 | Plane correlation | Pearson (phi) correlation between every pair of planes, including across R, G and B. |
 
 **Top-k reconstruction.** Keep the $k$ most-significant planes and fill in the
-missing $n-k$ bits in one of two ways:
+missing $n-k$ bits in one of three ways:
 
 $$
 \hat I_\text{zero} = \sum_{j=n-k}^{n-1} 2^j B_j, \qquad
-\hat I_\text{mid} = \hat I_\text{zero} + \frac{2^{n-k}-1}{2}
+\hat I_\text{mid} = \hat I_\text{zero} + \frac{2^{n-k}-1}{2}, \qquad
+\hat I_\text{random} = \hat I_\text{zero} + U\{0, \dots, 2^{n-k}-1\}
 $$
 
 For $n = 8$, $k = 1$ the midpoint fill is the constant baseline $128\,B_7 + 63.5$
-from the plan, and it is MSE-optimal when the missing bits are uniform. For each
-$k$ the analysis reports PSNR, SSIM and MAE for both fills, the raw cost
+from the plan, and it is MSE-optimal when the missing bits are uniform. The random
+fill draws the missing bits uniformly (fixed seed, so results are reproducible): it
+is a *sample* from a uniform prior, the no-model counterpart of the generative
+models. For uniform pixels its MSE is exactly twice the midpoint fill's, i.e.
+3.01 dB lower PSNR, the same gap expected between a perfect posterior sample and
+the best deterministic (MMSE) prediction. For each
+$k$ the analysis reports PSNR, SSIM and MAE for all three fills, the raw cost
 ($k \times$ channels bpp) and an estimated coded cost (sum of the kept planes'
 context entropies). Metrics are computed on the full-bit-depth, unrounded
 reconstruction. SSIM uses the standard Gaussian window (σ = 1.5), implemented with
@@ -112,6 +118,10 @@ dataset):
   plane adds ≈ 6 dB.
 - Midpoint fill always wins on PSNR/MAE, but zero fill often has *higher* SSIM
   for $k \ge 2$. This is one reason not to rely on a single metric.
+- Random fill sits ≈ 3 dB below midpoint on PSNR (13.8 vs 17.0 dB on Kodak at
+  $k = 1$) and has by far the lowest SSIM (0.13): independent per-pixel noise
+  destroys local structure. A generative model must beat it on both to show it
+  has learned something beyond "any value in the range".
 - For RGB, the MSB planes of R, G and B are clearly correlated with each other
   (ρ ≈ 0.3–0.7). This drops quickly for lower bits and is ≈ 0 by $B_3$.
 
@@ -154,7 +164,7 @@ from $B_7$ alone, before trying anything generative. It covers PLAN.md baselines
 
 | # | Method | What it predicts | How to get it |
 | --- | --- | --- | --- |
-| 1 | Midpoint fill $128\,B_7 + 63.5$ | constant (no model) | always included |
+| 1 | Midpoint fill $128\,B_7 + 63.5$ (plus zero and random fill for reference) | no model | always included |
 | 2 | Small CNN (8 conv layers, 17 px receptive field) | $I$ | `--preset cnn` |
 | 3 | U-Net (4 levels, 4.4 M params) | $I$ | `--preset unet` |
 | 4 | U-Net, residual | $R = I - 128\,B_7 \in [0, 127]$, then $\hat I = 128\,B_7 + \hat R$ | `--preset unet-res` |
@@ -183,14 +193,15 @@ python -m msbgen.cli.evaluate data/processed/kodak --models runs/*/best.pt --lpi
 ```
 
 Training logs its full history to `runs/<name>/log.jsonl`: training loss and PSNR,
-plus validation loss, PSNR, SSIM and gain over midpoint fill, starting at step 0.
+plus validation loss, PSNR, SSIM, the midpoint- and random-fill baselines on the
+same crops, and the gain over midpoint fill, starting at step 0.
 It also runs a **thermal guard**. When the GPU reaches 80 °C or the CPU 90 °C, it
 saves a checkpoint and pauses until both have cooled, which keeps a laptop from
 overheating and shutting down mid-run. See
 [msbgen/cli/README.md](msbgen/cli/README.md#train-train-a-baseline) for all options.
 
 Trained models show up automatically in the web app, in section **4 · Model
-reconstruction**, which sits next to the midpoint baseline. It has a toggle
+reconstruction**, which sits next to the zero, midpoint and random fills. It has a toggle
 between reconstructions and error maps ($|I - \hat I| \times 4$), and the
 PSNR/SSIM/MAE/consistency for the uploaded image. Colour uploads are converted to
 grayscale for the models.
@@ -199,8 +210,71 @@ Each training run takes roughly 1–1.5 h on the development laptop (GeForce MX3
 2 GB) with the default sizes. Measured speeds and memory are in
 [msbgen/models/README.md](msbgen/models/README.md).
 
-**Results:** to be filled in from the Kodak evaluation once the training runs
-finish.
+#### Results (Kodak)
+
+All 24 Kodak images, 8-bit grayscale, full resolution, $k = 1$ (only $B_7$
+transmitted). The table shows means over images; PSNR also shows ± the standard
+deviation over images. Each model is its `best.pt` (highest validation PSNR).
+
+| Method | PSNR (dB) ↑ | Δ vs midpoint | SSIM ↑ | LPIPS ↓ | MAE ↓ | MSB consistency |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Zero fill | 10.37 ± 0.92 | −6.64 | 0.238 | 0.583 | 69.1 | 1.000 |
+| Midpoint fill | 17.01 ± 1.53 | 0.00 | 0.579 | 0.517 | 31.8 | 1.000 |
+| Random fill | 13.82 ± 0.68 | −3.19 | 0.129 | 0.924 | 42.7 | 1.000 |
+| CNN (direct) | 18.04 ± 1.54 | +1.03 | 0.617 | **0.449** | 27.3 | 0.9995 |
+| U-Net (direct) | 18.55 ± 1.29 | +1.55 | 0.637 | 0.456 | 25.5 | 0.9986 |
+| U-Net (residual) | **18.60 ± 1.23** | **+1.59** | **0.637** | 0.455 | **25.3** | **1.000** |
+
+Training (DIV2K, 20k steps of 16 random 128×128 crops ≈ 2.35 epochs; validation on
+256×256 centre crops of DIV2K-valid):
+
+| Run | Params | Best step | Val PSNR (dB) | Val gain vs midpoint | Speed (MX350) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `cnn` | 0.22 M | 17k | 19.05 | +1.67 dB | 3.2 it/s |
+| `unet` | 4.4 M | 17k | 19.25 | +1.86 dB | 5.1 it/s |
+| `unet-res` | 4.4 M | 17k | 19.30 | +1.92 dB | 4.9 it/s |
+
+What the numbers show:
+
+- **A network recovers about 1.6 dB beyond the best constant guess.** The residual
+  U-Net beats the midpoint fill on PSNR for 21 of the 24 images, and every network
+  beats every fill on PSNR, SSIM, LPIPS and MAE on average. The gain is real but
+  small: $B_7$ alone carries limited information about the missing 7 bits.
+- **Global context helps fidelity.** The U-Net gains 0.5 dB PSNR and 0.02 SSIM over
+  the CNN, whose receptive field is only 17 px. The U-Net is also 20× larger, so
+  this comparison doesn't separate context from capacity.
+- **Residual vs direct is a tie on quality.** On PSNR the residual U-Net is ahead
+  by only 0.05 dB and wins on 13 of 24 images. Its real advantage is that it can
+  never contradict the transmitted bit (consistency 1.000 vs 0.9986), so it is
+  the default from here on.
+- **Perceptual quality barely improves.** LPIPS goes from 0.517 (midpoint) to only
+  ≈ 0.45, and the small CNN has the *best* LPIPS, beating the residual U-Net on 16
+  of 24 images. MSE training predicts the average of all images consistent with
+  $B_7$, which is smooth and blurry. Extra PSNR from the bigger model doesn't make
+  the output look more realistic. This is the gap the generative models (next
+  milestone) are meant to close.
+- **Noise is not texture.** Random fill scores 3.19 dB below the midpoint fill,
+  close to the theoretical 3.01 dB, and it has the worst LPIPS of all (0.924).
+  Filling the missing bits with plausible values *independently per pixel* looks
+  worse than a flat fill. A generative model has to produce detail that is
+  correlated across neighbouring pixels, and it should beat random fill clearly
+  on SSIM and LPIPS, not only on PSNR.
+- **Validation and test agree.** The gain over midpoint fill is +1.9 dB on
+  DIV2K-valid crops and +1.6 dB on Kodak. Training and validation PSNR are about
+  equal, so the models are not overfitting. The validation curves are flat after
+  ≈ 12k steps.
+
+**Failure case: brightness is ambiguous.** On `kodim02` (a dark door) all three
+networks are ≈ 2.5 dB *worse* than the midpoint fill. 98 % of its pixels have
+$B_7 = 0$ and they average 77.5, but the networks predict ≈ 55 there, because in
+DIV2K large $B_7 = 0$ regions are usually deep shadow. The midpoint's 63.5 happens
+to be closer. $B_7$ cannot tell a dim scene from a dark one, which is the
+one-to-many problem in its simplest form. A few bits of side information (e.g. one
+mean intensity per block) could remove this ambiguity cheaply; that is a candidate
+for the codec stage.
+
+The per-image scores and comparison strips are in `outputs/eval/kodak/`
+(`per_image.csv`, `summary.json`, `images/`); reproduce them with step 4 above.
 
 ## Project structure
 
@@ -212,7 +286,7 @@ MSBGen/
 │   ├── core/              # Framework-independent logic (see core/README.md)
 │   │   ├── bitplanes.py   # slice_bitplanes, reconstruct_from_planes, binary_entropy
 │   │   ├── analysis.py    # context entropy, correlations, top-k reconstruction, analyze_image
-│   │   ├── reconstruction.py  # Reconstructor interface, constant fills, evaluate()
+│   │   ├── reconstruction.py  # Reconstructor interface, fills (zero/mid/random), evaluate()
 │   │   ├── metrics.py     # PSNR, SSIM, MAE
 │   │   └── image_io.py    # decode uploads → grayscale/RGB uint8/uint16 arrays, PNG encoding
 │   ├── data/              # Dataset download/preparation + training crops (see data/README.md)
@@ -346,8 +420,9 @@ Same upload as `/api/bitplanes`. Returns the same image fields (`filename`,
   "correlation": { "labels": ["R·B7", "R·B6", "..."], "matrix": [[1.0, 0.26, "..."]] },
   "reconstructions": [
     { "k": 1, "bits": [7], "bits_per_pixel": 3, "coded_bpp": 0.288,
-      "psnr": { "zero": 11.85, "mid": 16.27 }, "ssim": { "zero": 0.468, "mid": 0.505 },
-      "mae": { "zero": 53.15, "mid": 33.14 }, "image": "data:image/png;base64,..." }
+      "psnr": { "zero": 11.85, "mid": 16.27, "random": 13.50 },
+      "ssim": { "zero": 0.468, "mid": 0.505, "random": 0.121 },
+      "mae": { "zero": 53.15, "mid": 33.14, "random": 44.00 }, "image": "data:image/png;base64,..." }
   ]
 }
 ```
@@ -383,7 +458,7 @@ fields plus:
 }
 ```
 
-Fills come first, then models. `psnr_gain` is relative to midpoint fill, and
+Fills come first (`zero`, `mid`, `random`), then models. `psnr_gain` is relative to midpoint fill, and
 `error_map` is $|I - \hat I| \times 4$. Errors: `400` for non-8-bit input or an
 invalid `k`, and `404` for an unknown model name.
 
@@ -415,6 +490,7 @@ a = analyze_image(img)                      # img: (H, W) or (H, W, C), uint8/ui
 a.planes[0].context_entropy                 # MSB cost with a 4-neighbour context
 a.correlation                               # (C·n, C·n) plane correlation matrix
 a.reconstructions[0].psnr["mid"]            # PSNR of 128·B7 + 63.5
+a.reconstructions[0].psnr["random"]         # PSNR of 128·B7 + uniform random low bits
 
 est = msb_reconstruction(img, k=2, fill="mid")   # float64, unrounded
 psnr(img, est, data_range=255), ssim(img, est, data_range=255)

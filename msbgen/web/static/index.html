@@ -84,8 +84,9 @@
           <p class="hint">
             Keep the k most-significant planes and fill in the missing bits.
             <strong>Midpoint</strong> sets them to the centre of their range, (2<sup>n−k</sup> − 1)/2
-            (e.g. 128·B<sub>7</sub> + 63.5, the constant baseline); <strong>zero</strong> truncates them.
-            Tiles show the midpoint fill.
+            (e.g. 128·B<sub>7</sub> + 63.5, the constant baseline); <strong>random</strong> draws them
+            uniformly from that range (a sample from a uniform prior, the no-model counterpart of a generative
+            reconstruction); <strong>zero</strong> truncates them. Tiles show the midpoint fill.
           </p>
           <div id="rec-chart" class="chart"></div>
           <div id="rec-legend" class="chart-legend"></div>
@@ -134,8 +135,8 @@
           </div>
         </div>
         <p class="hint">
-          Every method gets only the transmitted plane(s), never the original. The constant fills are the
-          no-model baselines; trained models are found in <code>runs/&lt;name&gt;/best.pt</code>.
+          Every method gets only the transmitted plane(s), never the original. The zero, midpoint and random
+          fills are the no-model baselines; trained models are found in <code>runs/&lt;name&gt;/best.pt</code>.
           <strong>Error ×4</strong> shows |I − Î| × 4: black is exact, bright is a large error.
         </p>
         <div id="models-grid" class="recon-grid"></div>

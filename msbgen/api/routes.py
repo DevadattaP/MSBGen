@@ -143,7 +143,7 @@ def _build_analysis(loaded: LoadedImage, filename: str | None) -> AnalysisRespon
     matrix = [[_finite(v) for v in row] for row in result.correlation.tolist()]
 
     def scores(d: dict[str, float | None]) -> FillScores:
-        return FillScores(zero=_finite(d["zero"]), mid=_finite(d["mid"]))
+        return FillScores(**{fill: _finite(v) for fill, v in d.items()})
 
     reconstructions = [
         Reconstruction(
@@ -268,7 +268,7 @@ def _build_reconstruction(loaded: LoadedImage, filename: str | None, k: int, nam
 
 @router.post("/reconstruct", response_model=ReconstructResponse)
 async def reconstruct(file: UploadFile, k: int = Form(1), models: str | None = Form(None)) -> ReconstructResponse:
-    """Reconstruct the image from its top k planes with the constant fills and every compatible
+    """Reconstruct the image from its top k planes with the fills (zero, mid, random) and every compatible
     trained model (or only `models`, comma-separated). Colour images are converted to grayscale."""
     loaded = await _load_upload(file)
     names = [m.strip() for m in models.split(",") if m.strip()] if models else None

@@ -14,6 +14,8 @@ Answers the Milestone "bit-plane analysis" questions for a single image:
   - zero fill:     Î = Σ_{top k} 2^j B_j                  (truncation)
   - midpoint fill: Î = Σ_{top k} 2^j B_j + (2^(n-k) - 1)/2 (MSE-optimal if the missing
     bits are uniform; for n = 8, k = 1 this is the baseline 128·B7 + 63.5)
+  - random fill:   Î = Σ_{top k} 2^j B_j + U{0, …, 2^(n-k) - 1} (a sample from the uniform
+    prior; the no-model counterpart of a generative reconstruction)
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ from msbgen.core.bitplanes import binary_entropy, infer_bit_depth, slice_bitplan
 from msbgen.core.metrics import mae, psnr, ssim
 from msbgen.core.reconstruction import FILL_RECONSTRUCTORS, keep_top_bits
 
-FILLS = ("zero", "mid")
+FILLS = tuple(FILL_RECONSTRUCTORS)  # ("zero", "mid", "random")
 CORRELATION_CHUNK = 1 << 20  # pixels per chunk; bounds memory for the plane×plane matrix
 
 
@@ -127,7 +129,8 @@ def msb_reconstruction(image: np.ndarray, k: int, fill: str = "mid", bit_depth: 
     Args:
         image: bool / uint8 / uint16 array (H, W) or (H, W, C).
         k: number of most-significant planes to keep, 1 … n.
-        fill: "zero" (missing bits = 0) or "mid" (missing bits at the centre of their range).
+        fill: "zero" (missing bits = 0), "mid" (missing bits at the centre of their range)
+            or "random" (missing bits uniformly random, fixed seed).
         bit_depth: n; defaults to the dtype's width.
     """
     n = infer_bit_depth(image) if bit_depth is None else bit_depth

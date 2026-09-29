@@ -11,7 +11,7 @@ python -m msbgen.cli.<tool> --help
 | [`analyze`](analyze.py) | Dataset-level bit-plane analysis → CSV, JSON and plots |
 | [`prepare_data`](prepare_data.py) | Download and convert datasets (DIV2K, Kodak) to grayscale `.npy` |
 | [`train`](train.py) | Train a deterministic baseline (CNN / U-Net) |
-| [`evaluate`](evaluate.py) | Score constant fills and trained checkpoints on a test set |
+| [`evaluate`](evaluate.py) | Score the fills (zero / mid / random) and trained checkpoints on a test set |
 | [`plot_runs`](plot_runs.py) | Plot training histories (loss, PSNR, SSIM, LR) and export them as CSV |
 
 The baseline workflow, end to end:
@@ -106,9 +106,9 @@ Progress goes to stderr, so `> summary.txt` captures just the table.
 | `k` | Number of most-significant planes kept |
 | `bits_per_pixel` | Raw cost, k × channels |
 | `coded_bpp` | Sum of the kept planes' context entropies (an estimate, see [core](../core/README.md#context-entropy-context_entropyplane)) |
-| `psnr_zero`, `psnr_mid` | PSNR (dB) for zero / midpoint fill; `inf` when lossless (k = n) |
-| `ssim_zero`, `ssim_mid` | SSIM; empty with `--no-ssim` or for images below 11×11 |
-| `mae_zero`, `mae_mid` | Mean absolute error in intensity levels |
+| `psnr_zero`, `psnr_mid`, `psnr_random` | PSNR (dB) for zero / midpoint / random fill; `inf` when lossless (k = n) |
+| `ssim_zero`, `ssim_mid`, `ssim_random` | SSIM; empty with `--no-ssim` or for images below 11×11 |
+| `mae_zero`, `mae_mid`, `mae_random` | Mean absolute error in intensity levels |
 
 These are long-format tables, so they load straight into pandas for your own
 aggregation:
@@ -133,8 +133,9 @@ rec.groupby("k")[["psnr_mid", "ssim_mid", "coded_bpp"]].agg(["mean", "std"])
       ],
       "reconstructions": [
         { "k": 1, "bits_per_pixel": 1, "coded_bpp": 0.12,
-          "psnr_zero": 11.9, "psnr_mid": 16.1, "ssim_zero": 0.42, "ssim_mid": 0.55,
-          "mae_zero": 52.1, "mae_mid": 32.8, "lossless_images": 0 }
+          "psnr_zero": 10.4, "psnr_mid": 17.0, "psnr_random": 13.8,
+          "ssim_zero": 0.238, "ssim_mid": 0.579, "ssim_random": 0.129,
+          "mae_zero": 69.1, "mae_mid": 31.8, "mae_random": 42.7, "lossless_images": 0 }
       ],
       "correlation": { "labels": ["B7", "B6", "..."], "matrix": [[1.0, 0.21, "..."]] }
     }
@@ -161,7 +162,7 @@ How the averages are computed:
 - Each worker holds one whole image at a time, together with its planes and a few
   float64 full-size buffers for the metrics. Lower `--workers` if very large
   images run out of memory.
-- SSIM runs 2 × n times per image (both fills, every k), so `--no-ssim` makes the
+- SSIM runs 3 × n times per image (all three fills, every k), so `--no-ssim` makes the
   run several times faster. Use it for large sweeps, then run SSIM on the final
   set.
 - With several workers, output order and results are deterministic. Files are
@@ -269,7 +270,7 @@ slowdown point is 100 °C.
 | Record | When | Fields |
 | --- | --- | --- |
 | training | every `--log-every` steps | `step`, `epoch`, `loss` (mean over those steps), `train_psnr` (PSNR of that mean MSE), `lr`, `it_per_s`, `gpu_temp`, `cpu_temp`, `paused_s` |
-| validation | step 0, then every `--val-every` steps | `step`, `epoch`, `val_loss`, `val_psnr`, `val_psnr_mid`, `val_gain_db`, `val_ssim`, `val_ssim_mid`, `val_msb_consistency`, `best_val_psnr` |
+| validation | step 0, then every `--val-every` steps | `step`, `epoch`, `val_loss`, `val_psnr`, `val_psnr_mid`, `val_psnr_random`, `val_gain_db`, `val_ssim`, `val_ssim_mid`, `val_ssim_random`, `val_msb_consistency`, `best_val_psnr` |
 
 - Training counts steps, not epochs. `epoch` = pixels seen / pixels in the training
   set, so it is fractional: 20k steps × 16 crops of 128² ≈ 2.4 epochs of DIV2K.
@@ -280,8 +281,9 @@ slowdown point is 100 °C.
 - Plot the history with [`plot_runs`](#plot_runs-training-curves).
 
 **Validation** uses one 256×256 centre crop per DIV2K-valid image. It reports the
-model's mean PSNR, the midpoint fill's PSNR on the same crops, and the **gain in
-dB**, which is the number that matters. If the gain isn't clearly positive, the
+model's mean PSNR, the midpoint and random fills' PSNR and SSIM on the same crops
+(the random fill uses a fixed seed, so it is identical at every validation), and
+the **gain in dB** over the midpoint fill, which is the number that matters. If the gain isn't clearly positive, the
 model has learned nothing beyond the constant fill.
 
 On the MX350 laptop GPU, 20k steps take about 1–1.5 h for the U-Net and about
@@ -307,9 +309,9 @@ python -m msbgen.cli.plot_runs runs/unet-res runs/unet --x epoch --out outputs/p
 | File | Content |
 | --- | --- |
 | `<run>_history.csv` | Training and validation records merged into one row per step, for your own plots or tables |
-| `<run>_overview.png` | Per run, 4 panels: train vs validation loss, train vs validation PSNR (with the midpoint-fill line), validation SSIM, learning rate |
+| `<run>_overview.png` | Per run, 4 panels: train vs validation loss, train vs validation PSNR (with the midpoint- and random-fill lines), validation SSIM, learning rate |
 | `loss.png` | All runs: training loss (faint, smoothed) and validation loss (markers), log scale |
-| `val_psnr.png`, `val_ssim.png` | All runs, with the midpoint-fill baseline as a dashed line |
+| `val_psnr.png`, `val_ssim.png` | All runs, with the midpoint-fill (dashed) and random-fill (dotted) baselines. Runs logged before the random fill existed have no random-fill values, so that line is omitted for them. |
 | `val_gain.png` | All runs: PSNR gain over midpoint fill, the main "did it learn anything" curve |
 | `lr.png` | Learning-rate schedules |
 
@@ -324,15 +326,15 @@ python -m msbgen.cli.evaluate data/processed/kodak --models runs/*/best.pt --lpi
 ```
 
 Every method gets **only the top-k bits** of each image (through the
-`Reconstructor` interface) and is scored against the original. The zero and
-midpoint fills are always included as baselines.
+`Reconstructor` interface) and is scored against the original. The zero, midpoint
+and random fills are included as baselines by default.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `data` | required | Folder of prepared `.npy` files or ordinary images (converted to grayscale) |
 | `--models` | none | Checkpoints; each is named after its run folder |
 | `--k` | 1 | Transmitted planes; models trained for another k are skipped |
-| `--fills` | `zero mid` | Constant baselines to include |
+| `--fills` | `zero mid random` | Fill baselines to include |
 | `--lpips` | off | Also compute LPIPS (downloads AlexNet weights once) |
 | `--no-ssim` | off | Skip SSIM |
 | `--limit N` | all | First N images only |

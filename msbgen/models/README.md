@@ -1,6 +1,6 @@
 # `msbgen.models`
 
-Neural reconstructors, i.e. the trained counterparts of the constant fills in
+Neural reconstructors, i.e. the trained counterparts of the fills in
 [`msbgen.core.reconstruction`](../core/README.md#reconstructors-reconstructionpy).
 This package needs PyTorch. `msbgen.core` never imports it, so the web app and the
 analysis tools still work without torch installed.

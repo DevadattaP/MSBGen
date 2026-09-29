@@ -8,9 +8,12 @@ Writes to --out (default outputs/plots):
     <run>_history.csv     training and validation records merged into one row per step
     <run>_overview.png    per run: train vs val loss, train vs val PSNR, val SSIM, LR
     loss.png              all runs: training loss (faint) and validation loss (markers)
-    val_psnr.png          all runs: validation PSNR, with the midpoint-fill baseline
+    val_psnr.png          all runs: validation PSNR, with the midpoint- and random-fill baselines
     val_gain.png          all runs: PSNR gain over midpoint fill
-    val_ssim.png          all runs: validation SSIM, with the midpoint-fill baseline
+    val_ssim.png          all runs: validation SSIM, with the midpoint- and random-fill baselines
+
+Runs logged before the random fill was added have no random-fill values; their line is
+simply left out.
     lr.png                all runs: learning-rate schedule
 """
 
@@ -25,8 +28,9 @@ from pathlib import Path
 import numpy as np
 
 TRAIN_FIELDS = ["loss", "train_psnr", "lr", "it_per_s", "gpu_temp", "cpu_temp", "paused_s"]
-VAL_FIELDS = ["val_loss", "val_psnr", "val_psnr_mid", "val_gain_db", "val_ssim", "val_ssim_mid",
-              "val_msb_consistency", "best_val_psnr"]
+VAL_FIELDS = ["val_loss", "val_psnr", "val_psnr_mid", "val_psnr_random", "val_gain_db", "val_ssim", "val_ssim_mid",
+              "val_ssim_random", "val_msb_consistency", "best_val_psnr"]
+BASELINES = {"mid": ("--", "midpoint fill"), "random": (":", "random fill")}  # fill → (line style, label)
 
 
 def read_history(run_dir: Path) -> tuple[list[dict], list[dict]]:
@@ -116,12 +120,18 @@ def main(argv: list[str] | None = None) -> int:
         if y:
             ax.plot(x, smooth(y, args.smooth), color="C0", label="train (smoothed)")
         ax.plot(*series(val, "val_psnr", args.x), "o-", color="C1", ms=3, label="validation")
-        ax.plot(*series(val, "val_psnr_mid", args.x), "--", color="0.5", label="midpoint fill (val)")
+        for fill, (ls, label) in BASELINES.items():
+            x, y = series(val, f"val_psnr_{fill}", args.x)
+            if y:
+                ax.plot(x, y, ls, color="0.5", label=f"{label} (val)")
         ax.set(title="PSNR (dB)", xlabel=xlabel)
         ax.legend()
         ax = axes[1, 0]
         ax.plot(*series(val, "val_ssim", args.x), "o-", color="C1", ms=3, label="validation")
-        ax.plot(*series(val, "val_ssim_mid", args.x), "--", color="0.5", label="midpoint fill (val)")
+        for fill, (ls, label) in BASELINES.items():
+            x, y = series(val, f"val_ssim_{fill}", args.x)
+            if y:
+                ax.plot(x, y, ls, color="0.5", label=f"{label} (val)")
         ax.set(title="SSIM", xlabel=xlabel)
         ax.legend()
         ax = axes[1, 1]
@@ -135,6 +145,8 @@ def main(argv: list[str] | None = None) -> int:
     # ---- comparisons ----
     def compare(filename: str, title: str, ylabel: str, key: str, baseline: str | None = None,
                 train_key: str | None = None, logy: bool = False) -> None:
+        """`baseline`: metric prefix such as "val_psnr"; the fills in BASELINES are drawn as
+        horizontal lines (mean over the first run that logged them)."""
         fig, ax = plt.subplots(figsize=(7.5, 4.5))
         for i, (name, (train, val)) in enumerate(histories.items()):
             c = colours[i % len(colours)]
@@ -143,11 +155,10 @@ def main(argv: list[str] | None = None) -> int:
                 if y:
                     ax.plot(x, smooth(y, args.smooth), color=c, alpha=0.35, lw=1)
             ax.plot(*series(val, key, args.x), "o-", color=c, ms=3, label=name)
-        if baseline:
-            first_val = next(iter(histories.values()))[1]
-            x, y = series(first_val, baseline, args.x)
+        for fill, (ls, label) in BASELINES.items() if baseline else ():
+            y = next((y for _, val in histories.values() if (y := series(val, f"{baseline}_{fill}", args.x)[1])), None)
             if y:
-                ax.axhline(float(np.mean(y)), ls="--", color="0.5", label="midpoint fill")
+                ax.axhline(float(np.mean(y)), ls=ls, color="0.5", label=label)
         ax.set(title=title, xlabel=xlabel, ylabel=ylabel)
         if logy:
             ax.set_yscale("log")
@@ -157,9 +168,9 @@ def main(argv: list[str] | None = None) -> int:
 
     compare("loss.png", "Loss (faint: training, smoothed; markers: validation)", "loss", "val_loss",
             train_key="loss", logy=True)
-    compare("val_psnr.png", "Validation PSNR", "PSNR (dB)", "val_psnr", baseline="val_psnr_mid")
+    compare("val_psnr.png", "Validation PSNR", "PSNR (dB)", "val_psnr", baseline="val_psnr")
     compare("val_gain.png", "Validation PSNR gain over midpoint fill", "gain (dB)", "val_gain_db")
-    compare("val_ssim.png", "Validation SSIM", "SSIM", "val_ssim", baseline="val_ssim_mid")
+    compare("val_ssim.png", "Validation SSIM", "SSIM", "val_ssim", baseline="val_ssim")
 
     fig, ax = plt.subplots(figsize=(7.5, 4.5))
     for i, (name, (train, _)) in enumerate(histories.items()):

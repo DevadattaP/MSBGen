@@ -25,8 +25,7 @@ The complete system will eventually look like this:
  │              MSB B7                                       │
  │                 │                                         │
  │                 ▼                                         │
- │        Binary compression /                               │
- │        entropy coding                                     │
+ │        Binary compression / entropy coding                │
  │                 │                                         │
  └─────────────────┼─────────────────────────────────────────┘
                    │
@@ -38,7 +37,7 @@ The complete system will eventually look like this:
  ┌───────────────────────────────────────────────────────────┐
  │                         RECEIVER                          │
  │                                                           │
- │             compressed MSB                               │
+ │             compressed MSB                                │
  │                   │                                       │
  │                   ▼                                       │
  │             reconstructed B7                              │
@@ -76,7 +75,7 @@ The random \(z\) is important because **one MSB plane does not uniquely determin
 
 ---
 
-# 2. First establish the fundamental information problem
+## 2. First establish the fundamental information problem
 
 Before touching diffusion or flow matching, prove what information exists in the MSB.
 
@@ -127,7 +126,7 @@ I recommend using this formulation as one of your principal experiments.
 
 ---
 
-# 3. Define the research questions before implementation
+## 3. Define the research questions before implementation
 
 Your project should answer several concrete questions.
 
@@ -175,7 +174,7 @@ That last question is important. **1 bit/pixel is the raw MSB representation, no
 
 ---
 
-# 4. Phase 0 — Literature and problem definition
+## 4. Phase 0 — Literature and problem definition
 
 Before coding the main model, create a literature matrix.
 
@@ -222,7 +221,7 @@ This will become very important for interpreting your results.
 
 ---
 
-# 5. Phase 1 — Dataset
+## 5. Phase 1 — Dataset
 
 Start with a standard natural-image dataset.
 
@@ -257,7 +256,7 @@ The final evaluation should contain **different image categories**.
 
 ---
 
-# 6. Phase 2 — Build the bit-plane dataset
+## 6. Phase 2 — Build the bit-plane dataset
 
 This is your first actual experiment.
 
@@ -303,7 +302,7 @@ This dataset design will save you considerable time later.
 
 ---
 
-# 7. Very important: don't immediately use compression
+## 7. Very important: don't immediately use compression
 
 Initially:
 
@@ -341,7 +340,7 @@ Only after that should you add actual communication compression.
 
 ---
 
-# 8. Phase 3 — Establish simple baselines
+## 8. Phase 3 — Establish simple baselines
 
 This phase is extremely important for your eventual paper.
 
@@ -422,7 +421,7 @@ This may be substantially easier.
 
 ---
 
-# 9. Phase 4 — Treat reconstruction as a conditional distribution
+## 9. Phase 4 — Treat reconstruction as a conditional distribution
 
 This is the conceptual heart of your project.
 
@@ -473,7 +472,7 @@ That is exactly why diffusion/flow models are relevant.
 
 ---
 
-# 10. Phase 5 — First generative model: conditional diffusion
+## 10. Phase 5 — First generative model: conditional diffusion
 
 Do **not** start with a complicated hybrid.
 
@@ -517,7 +516,7 @@ or preferably investigate **v-prediction**.
 
 ---
 
-# 11. But predict the residual
+## 11. But predict the residual
 
 I recommend testing:
 
@@ -555,7 +554,7 @@ This explicitly preserves the information you know rather than forcing the netwo
 
 ---
 
-# 12. Phase 6 — Flow matching
+## 12. Phase 6 — Flow matching
 
 Once diffusion works, implement conditional flow matching.
 
@@ -614,7 +613,7 @@ This comparison itself could become an important experimental contribution.
 
 ---
 
-# 13. Phase 7 — Normalizing flow
+## 13. Phase 7 — Normalizing flow
 
 Now investigate conditional normalizing flow.
 
@@ -655,7 +654,7 @@ That gives you an interesting comparison:
 
 ---
 
-# 14. Phase 8 — Only now investigate a hybrid
+## 14. Phase 8 — Only now investigate a hybrid
 
 After you have three independent baselines, investigate the combination.
 
@@ -742,7 +741,7 @@ But **this should be the final experiment, not your starting point.**
 
 ---
 
-# 15. An alternative hybrid may be even better
+## 15. An alternative hybrid may be even better
 
 Instead of sequentially stacking all three, use different models for different frequency information.
 
@@ -788,7 +787,7 @@ That would provide a **reason for combining the models**, rather than combining 
 
 ---
 
-# 16. Phase 9 — Introduce additional MSB planes
+## 16. Phase 9 — Introduce additional MSB planes
 
 Once \(B_7\) works—or you establish its limitations—perform:
 
@@ -824,7 +823,7 @@ This could produce one of your most interesting graphs.
 
 ---
 
-# 17. Your main experimental table
+## 17. Your main experimental table
 
 Eventually you want something like:
 
@@ -841,7 +840,7 @@ Eventually you want something like:
 
 ---
 
-# 18. Don't rely on PSNR alone
+## 18. Don't rely on PSNR alone
 
 This is especially important.
 
@@ -891,7 +890,7 @@ Potentially CLIP-based similarity for RGB/natural images.
 
 ---
 
-# 19. Very important: evaluate reconstruction diversity
+## 19. Very important: evaluate reconstruction diversity
 
 This is something I'd strongly recommend adding.
 
@@ -931,7 +930,7 @@ This makes the **generative nature of the problem** much clearer.
 
 ---
 
-# 20. Communication/compression phase
+## 20. Communication/compression phase
 
 Only after reconstruction works should you implement the actual codec.
 
@@ -974,7 +973,7 @@ Don't report simply "1 bpp" if your side information makes the actual bitrate hi
 
 ---
 
-# 21. Add realistic channel conditions later
+## 21. Add realistic channel conditions later
 
 Once the codec works:
 
@@ -1005,7 +1004,7 @@ This can become an additional communication-system contribution.
 
 ---
 
-# 22. A particularly interesting extension: spatially adaptive planes
+## 22. A particularly interesting extension: spatially adaptive planes
 
 Eventually, you could ask:
 
@@ -1035,7 +1034,7 @@ But keep this as a **later extension**, not part of Version 1.
 
 ---
 
-# 23. Recommended project milestones
+## 23. Recommended project milestones
 
 ## Milestone 1 — Bit-plane analysis
 
@@ -1188,63 +1187,7 @@ conditional generative reconstruction
 
 ---
 
-# 24. Suggested research timeline
-
-A realistic sequence would be:
-
-### Weeks 1–2
-
-Literature review + dataset preparation.
-
-### Weeks 3–4
-
-Bit-plane analysis and baseline reconstruction.
-
-### Weeks 5–7
-
-CNN/U-Net reconstruction.
-
-### Weeks 8–11
-
-Conditional diffusion.
-
-### Weeks 12–14
-
-Flow matching.
-
-### Weeks 15–17
-
-Normalizing flow.
-
-### Weeks 18–21
-
-Hybrid architecture.
-
-### Weeks 22–24
-
-1/2/3 MSB experiments.
-
-### Weeks 25–27
-
-Entropy coding + actual bitrate.
-
-### Weeks 28–30
-
-Ablation studies.
-
-### Weeks 31–34
-
-Cross-dataset evaluation.
-
-### Weeks 35–38
-
-Paper/report + final codec/demo.
-
-You can compress this considerably if you're working full-time.
-
----
-
-# 25. Ablation studies you should plan from day one
+## 24. Ablation studies you should plan from day one
 
 Your final work should answer:
 
@@ -1310,7 +1253,7 @@ B7 + noise → generator.
 
 ---
 
-# 26. Your biggest technical risks
+## 25. Your biggest technical risks
 
 There are several.
 
@@ -1386,7 +1329,7 @@ That is scientifically much better than forcing the hybrid to win.
 
 ---
 
-# 27. The research hypothesis I recommend
+## 26. The research hypothesis I recommend
 
 I would write the central hypothesis as:
 
@@ -1401,199 +1344,3 @@ And the third:
 > **Progressively transmitting additional MSB planes provides a controllable rate–distortion–perception tradeoff.**
 
 These are testable hypotheses rather than assumptions.
-
----
-
-# 28. A possible paper structure
-
-If this eventually becomes a publication, I'd structure it roughly as:
-
-### 1. Introduction
-
-Problem:
-
-$$
-8\text{-bit image}\rightarrow1\text{-bit MSB representation}
-$$
-
-Motivation:
-
-* extreme compression
-* generative priors
-* communication efficiency.
-
-### 2. Related Work
-
-* bit-plane compression
-* learned image compression
-* generative compression
-* diffusion compression
-* normalizing flows
-* flow matching.
-
-### 3. Problem Formulation
-
-$$
-B_7=\operatorname{MSB}(I)
-$$
-
-and:
-
-$$
-\hat I\sim p_\theta(I|B_7).
-$$
-
-### 4. Proposed Method
-
-Potential architecture:
-
-$$
-B_7\rightarrow\text{condition encoder}
-\rightarrow NF/FM/diffusion
-\rightarrow\hat R
-\rightarrow\hat I.
-$$
-
-### 5. Experiments
-
-* 1 MSB
-* 2 MSBs
-* 3 MSBs
-* model comparisons
-* ablations.
-
-### 6. Rate-Distortion-Perception Analysis
-
-### 7. Limitations
-
-### 8. Conclusion.
-
----
-
-# 29. What I would implement first
-
-If you are starting **today**, don't implement the hybrid.
-
-Your first experimental pipeline should be:
-
-```text
-                  TRAINING
-
-Original I
-   │
-   ├──────────────► Target
-   │                  I
-   │
-   ▼
-Extract B7
-   │
-   ▼
-128 × B7
-   │
-   ▼
-Residual target
-R = I - 128B7
-   │
-   │
-   └──────────────► Conditional U-Net
-                         │
-                         ▼
-                       R̂
-                         │
-                         ▼
-                 Î = 128B7 + R̂
-```
-
-Then train it with:
-
-$$
-L=
-\lambda_1L_{MSE}
-+
-\lambda_2L_{SSIM}
-+
-\lambda_3L_{perceptual}.
-$$
-
-**Only after this baseline works should you replace the U-Net with diffusion/flow matching.**
-
----
-
-# 30. The final research progression
-
-The entire project can therefore be viewed as:
-
-```text
-                       START
-                         │
-                         ▼
-                 MSB information
-                    analysis
-                         │
-                         ▼
-                  B7 → image
-                  deterministic
-                         │
-                         ▼
-               B7 → residual
-                         │
-                         ▼
-              conditional diffusion
-                         │
-                         ▼
-             conditional flow matching
-                         │
-                         ▼
-             conditional normalizing flow
-                         │
-                         ▼
-                  hybrid models
-                         │
-                         ▼
-                 B7 + B6
-                         │
-                         ▼
-              B7 + B6 + B5
-                         │
-                         ▼
-                entropy coding
-                         │
-                         ▼
-              actual communication
-                         │
-                         ▼
-            rate–distortion–perception
-                         │
-                         ▼
-                  FINAL CODEC
-```
-
-## One strategic point I'd emphasize
-
-**Don't make "using three models together" the research goal.**
-
-Make the research goal:
-
-$$
-\boxed{
-\textbf{Extreme image compression from MSB information using conditional generative reconstruction}
-}
-$$
-
-Then investigate **which generative mechanism—diffusion, normalizing flow, flow matching, or a principled combination—best solves it**.
-
-That gives you a much cleaner scientific story, and it also protects the project if one of the three models turns out not to help.
-
-The most important first experiment is therefore surprisingly simple:
-
-$$
-\boxed{
-B_7
-\longrightarrow
-\text{conditional generative model}
-\longrightarrow
-\hat I
-}
-$$
-
-at **64×64 or 128×128 resolution**, with the **same MSB plane fixed while generating multiple samples**. That experiment will tell you very quickly whether the core premise has enough information to support the larger project.

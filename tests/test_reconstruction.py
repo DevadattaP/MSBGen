@@ -47,6 +47,18 @@ def test_reconstructor_only_sees_top_bits(img):
     assert np.all(seen["top"] % 64 == 0)  # the 6 lower bits are always zero
 
 
+def test_random_fill_keeps_top_bits_and_is_reproducible(img):
+    for k in (1, 3, 7, 8):
+        est = msb_reconstruction(img, k, "random")
+        assert np.array_equal(est, np.floor(est))  # integer levels, like a real image
+        assert est.min() >= 0 and est.max() <= 255
+        assert msb_consistency(img, est, k, 8) == 1.0
+        assert np.array_equal(est, msb_reconstruction(img, k, "random"))  # fixed seed
+    assert np.array_equal(msb_reconstruction(img, 8, "random"), img)  # nothing missing → lossless
+    low = msb_reconstruction(img, 1, "random") - keep_top_bits(img, 1)
+    assert len(np.unique(low)) > 100  # the missing bits really vary
+
+
 def test_round_estimate_half_up_and_clipped():
     assert round_estimate(np.array([63.5, 191.5, -3.0, 300.0]), 8).tolist() == [64, 192, 0, 255]
 

@@ -7,6 +7,7 @@ const API_RECONSTRUCT = "/api/reconstruct";
 const CHANNEL_COLORS = { R: "var(--ch-r)", G: "var(--ch-g)", B: "var(--ch-b)", L: "var(--ch-gray)" };
 const FILL_SERIES = [
   { fill: "mid", name: "Midpoint fill", color: "var(--series-mid)", dashed: false },
+  { fill: "random", name: "Random fill", color: "var(--series-random)", dashed: false },
   { fill: "zero", name: "Zero fill", color: "var(--series-zero)", dashed: true },
 ];
 const METRICS = {
@@ -321,7 +322,7 @@ function renderModels(data) {
   el.modelsGrid.replaceChildren(...tiles);
 
   const rows = data.results.map((r) => {
-    const gain = r.kind === "model" || r.name === "zero" ? gainText(r.psnr_gain, true) : "—";
+    const gain = r.kind === "model" || r.name !== "mid" ? gainText(r.psnr_gain, true) : "—";
     return `<tr><td>${escapeHtml(r.label)}${r.kind === "model" ? ` <span class="hint">${escapeHtml(r.name)}</span>` : ""}</td>` +
       `<td>${r.kind === "model" ? "model" : "baseline"}</td><td>${fmt(r.psnr, 2)}</td><td>${gain}</td>` +
       `<td>${fmt(r.ssim, 4)}</td><td>${r.mae.toFixed(2)}</td><td>${pct(r.msb_consistency)}</td></tr>`;
@@ -575,16 +576,20 @@ function renderReconstructions(data) {
   );
 
   const perChannel = data.channels.length > 1 ? ` (${data.channels.length} channels)` : "";
+  // One column group per metric, one column per fill (same order as the chart legend).
+  const columns = [
+    { metric: "psnr", title: "PSNR", format: (v) => (v == null ? "∞" : v.toFixed(2)) },
+    { metric: "ssim", title: "SSIM", format: (v) => fmt(v, 4) },
+    { metric: "mae", title: "MAE", format: (v) => v.toFixed(2) },
+  ];
+  const cells = (render) => columns.flatMap((c) =>
+    FILL_SERIES.map((s, i) => `<${render.tag}${i === 0 ? ' class="group-start"' : ""}>${render.body(c, s)}</${render.tag}>`)).join("");
   const head = `<thead><tr><th>k</th><th>Planes</th><th>Raw bpp${perChannel}</th><th>≈ Coded bpp</th>` +
-    `<th class="group-start">PSNR mid</th><th>PSNR zero</th><th class="group-start">SSIM mid</th>` +
-    `<th>SSIM zero</th><th class="group-start">MAE mid</th><th>MAE zero</th></tr></thead>`;
+    `${cells({ tag: "th", body: (c, s) => `${c.title} ${s.fill}` })}</tr></thead>`;
   const rows = data.reconstructions.map((r) => {
-    const psnr = (v) => (v == null ? "∞" : v.toFixed(2));
     const bits = r.k === 1 ? `B${r.bits[0]}` : `B${r.bits[0]}–B${r.bits.at(-1)}`;
     return `<tr><td>${r.k}</td><td>${bits}</td><td>${r.bits_per_pixel}</td><td>${r.coded_bpp.toFixed(3)}</td>` +
-      `<td class="group-start">${psnr(r.psnr.mid)}</td><td>${psnr(r.psnr.zero)}</td>` +
-      `<td class="group-start">${fmt(r.ssim.mid, 4)}</td><td>${fmt(r.ssim.zero, 4)}</td>` +
-      `<td class="group-start">${r.mae.mid.toFixed(2)}</td><td>${r.mae.zero.toFixed(2)}</td></tr>`;
+      `${cells({ tag: "td", body: (c, s) => c.format(r[c.metric][s.fill]) })}</tr>`;
   });
   el.recTable.innerHTML = `${head}<tbody>${rows.join("")}</tbody>`;
 

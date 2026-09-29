@@ -30,6 +30,7 @@ from msbgen.core.metrics import mae, mse, psnr, ssim
 from msbgen.core.reconstruction import (
     FILL_RECONSTRUCTORS,
     MidpointFill,
+    RandomFill,
     Reconstructor,
     ZeroFill,
     evaluate,
@@ -42,6 +43,7 @@ from msbgen.core.reconstruction import (
 __all__ = [
     "FILL_RECONSTRUCTORS",
     "MidpointFill",
+    "RandomFill",
     "Reconstructor",
     "ZeroFill",
     "evaluate",

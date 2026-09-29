@@ -114,6 +114,15 @@ def test_midpoint_psnr_matches_uniform_theory(rng):
         assert psnr(img, msb_reconstruction(img, k, "mid"), 255) == pytest.approx(expected, abs=0.1)
 
 
+def test_random_fill_psnr_matches_uniform_theory(rng):
+    # Random fill is an independent draw from the same uniform range: MSE doubles, (4^(n-k) - 1) / 6,
+    # so it sits 10·log10(2) ≈ 3.01 dB below the midpoint fill.
+    img = rng.integers(0, 256, (256, 256), dtype=np.uint8)
+    for k in (1, 4, 7):
+        expected = 10 * np.log10(255**2 / ((4 ** (8 - k) - 1) / 6))
+        assert psnr(img, msb_reconstruction(img, k, "random"), 255) == pytest.approx(expected, abs=0.1)
+
+
 def test_analyze_image_structure():
     img = np.stack([_smooth_image()] * 3, axis=-1)
     a = analyze_image(img)

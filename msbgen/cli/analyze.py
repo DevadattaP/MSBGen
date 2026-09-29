@@ -30,13 +30,15 @@ from pathlib import Path
 import numpy as np
 
 from msbgen.core import ImageDecodeError, analyze_image, load_image, to_grayscale
+from msbgen.core.analysis import FILLS
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp", ".ppm", ".pgm"}
 PLANE_FIELDS = ["file", "group", "channel", "bit", "ones_ratio", "entropy", "context_entropy", "spatial_correlation"]
 REC_FIELDS = [
     "file", "group", "k", "bits_per_pixel", "coded_bpp",
-    "psnr_zero", "psnr_mid", "ssim_zero", "ssim_mid", "mae_zero", "mae_mid",
+    *(f"{metric}_{fill}" for metric in ("psnr", "ssim", "mae") for fill in FILLS),
 ]
+FILL_PLOT_STYLES = {"mid": ("-o", "midpoint fill"), "random": ("-.^", "random fill"), "zero": ("--s", "zero fill")}
 
 
 def find_images(root: Path, recursive: bool) -> list[Path]:
@@ -70,7 +72,7 @@ def analyse_file(path: Path, root: Path, gray: bool, with_ssim: bool) -> dict:
     recs = [
         {
             "file": name, "group": group, "k": r.k, "bits_per_pixel": r.bits_per_pixel, "coded_bpp": r.coded_bpp,
-            **{f"{metric}_{fill}": getattr(r, metric)[fill] for metric in ("psnr", "ssim", "mae") for fill in ("zero", "mid")},
+            **{f"{metric}_{fill}": getattr(r, metric)[fill] for metric in ("psnr", "ssim", "mae") for fill in FILLS},
         }
         for r in result.reconstructions
     ]
@@ -146,13 +148,15 @@ def print_summary(summary: dict) -> None:
             label = f"{p['channel']}·B{p['bit']}" if len(s["channels"]) > 1 else f"B{p['bit']}"
             rho = "-" if p["spatial_correlation"] is None else f"{p['spatial_correlation']:.3f}"
             print(f"{label:>8} {p['entropy']:7.3f} {p['context_entropy']:7.3f} {rho:>6}")
-        print(f"\n{'k':>3} {'bpp':>4} {'coded':>7} {'PSNR mid':>9} {'PSNR zero':>10} {'SSIM mid':>9} {'SSIM zero':>10}")
+        fills = ("mid", "random", "zero")
+        cols = [(metric, fill) for metric in ("psnr", "ssim") for fill in fills]
+        print(f"\n{'k':>3} {'bpp':>4} {'coded':>7} " + " ".join(f"{f'{m.upper()} {fl}':>11}" for m, fl in cols))
         for r in s["reconstructions"]:
             def f(v, d):
                 return "inf" if v is None else f"{v:.{d}f}"
             print(
-                f"{r['k']:>3} {r['bits_per_pixel']:>4} {r['coded_bpp']:7.3f} {f(r['psnr_mid'], 2):>9} "
-                f"{f(r['psnr_zero'], 2):>10} {f(r['ssim_mid'], 4):>9} {f(r['ssim_zero'], 4):>10}"
+                f"{r['k']:>3} {r['bits_per_pixel']:>4} {r['coded_bpp']:7.3f} "
+                + " ".join(f"{f(r[f'{m}_{fl}'], 2 if m == 'psnr' else 4):>11}" for m, fl in cols)
             )
 
 
@@ -185,9 +189,8 @@ def make_plots(summary: dict, out: Path) -> list[Path]:
             if all(r[f"{metric}_mid"] is None for r in s["reconstructions"]):
                 continue
             fig, ax = plt.subplots(figsize=(6.5, 3.8))
-            for fill, style in (("mid", "-o"), ("zero", "--s")):
-                ax.plot(ks, [r[f"{metric}_{fill}"] for r in s["reconstructions"]], style, ms=4,
-                        label=f"{'midpoint' if fill == 'mid' else 'zero'} fill")
+            for fill, (style, name) in FILL_PLOT_STYLES.items():
+                ax.plot(ks, [r[f"{metric}_{fill}"] for r in s["reconstructions"]], style, ms=4, label=name)
             ax.set(xticks=ks, xlabel="k (most-significant planes kept)", ylabel=label,
                    title=f"Top-k reconstruction · {group} (n={s['images']})")
             ax.grid(alpha=0.3)

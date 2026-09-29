@@ -11,8 +11,9 @@ A run lives in `<out_dir>/<name>/`:
 
     {"step", "epoch", "loss", "train_psnr", "lr", "it_per_s",
      "gpu_temp", "cpu_temp", "paused_s"}                                       every `log_every` steps
-    {"step", "epoch", "val_loss", "val_psnr", "val_psnr_mid", "val_gain_db",
-     "val_ssim", "val_ssim_mid", "val_msb_consistency", "best_val_psnr"}       every `val_every` steps and at step 0
+    {"step", "epoch", "val_loss", "val_psnr", "val_psnr_mid", "val_psnr_random",
+     "val_gain_db", "val_ssim", "val_ssim_mid", "val_ssim_random",
+     "val_msb_consistency", "best_val_psnr"}                                  every `val_every` steps and at step 0
 
 `loss` is the mean training loss over the last `log_every` steps and `train_psnr` the PSNR
 of that mean MSE (MSE loss only). `epoch` = pixels seen / pixels in the training set, so
@@ -109,35 +110,42 @@ def _psnr_per_image(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 @torch.no_grad()
 def validate(model: MSBNet, loader: DataLoader, device: torch.device, loss_fn=F.mse_loss) -> dict[str, float]:
     """Validation loss, and mean per-image PSNR / SSIM of the model and of the midpoint-fill
-    baseline on the same crops, plus MSB consistency."""
+    and random-fill baselines on the same crops, plus MSB consistency.
+
+    The random fill uses a fixed seed, so every validation sees the same noise."""
     cfg = model.config
     n, k = cfg.bit_depth, cfg.k
     peak = model.max_value
     model.eval()
-    losses, psnr_model, psnr_mid, ssim_model, ssim_mid, consistent = [], [], [], [], [], []
+    gen = torch.Generator(device=device).manual_seed(0)
+    losses, consistent = [], []
+    psnrs: dict[str, list] = {"model": [], "mid": [], "random": []}
+    ssims: dict[str, list] = {"model": [], "mid": [], "random": []}
     for batch in loader:
         x = batch.to(device)
         target = x.float() / peak
         top = keep_top_bits_t(x, k, n)
         pred = model(top)
-        mid = (top + model.residual_max / 2) / peak
+        noise = torch.randint(0, int(model.residual_max) + 1, top.shape, generator=gen, device=device)
+        estimates = {"model": pred, "mid": (top + model.residual_max / 2) / peak, "random": (top + noise) / peak}
         losses.append(loss_fn(pred, target, reduction="none").flatten(1).mean(1))
-        psnr_model.append(_psnr_per_image(pred, target))
-        psnr_mid.append(_psnr_per_image(mid, target))
-        for ref, est, est_mid in zip(x.cpu().numpy(), (pred * peak).cpu().numpy(), (mid * peak).cpu().numpy()):
-            ssim_model.append(ssim(ref[0], est[0], peak))
-            ssim_mid.append(ssim(ref[0], est_mid[0], peak))
+        ref = x.cpu().numpy()
+        for name, est in estimates.items():
+            psnrs[name].append(_psnr_per_image(est, target))
+            ssims[name] += [ssim(r[0], e[0], peak) for r, e in zip(ref, (est * peak).cpu().numpy())]
         rounded = torch.floor(pred * peak + 0.5).clamp(0, peak)
         consistent.append((keep_top_bits_t(rounded, k, n) == top).float().flatten(1).mean(1))
     model.train()
-    pm, pb = torch.cat(psnr_model).mean().item(), torch.cat(psnr_mid).mean().item()
+    psnr = {name: torch.cat(v).mean().item() for name, v in psnrs.items()}
 
     def mean_ssim(values: list) -> float | None:
         values = [v for v in values if v is not None]  # None for crops smaller than the SSIM window
         return float(np.mean(values)) if values else None
 
-    return {"val_loss": torch.cat(losses).mean().item(), "val_psnr": pm, "val_psnr_mid": pb,
-            "val_gain_db": pm - pb, "val_ssim": mean_ssim(ssim_model), "val_ssim_mid": mean_ssim(ssim_mid),
+    return {"val_loss": torch.cat(losses).mean().item(), "val_psnr": psnr["model"], "val_psnr_mid": psnr["mid"],
+            "val_psnr_random": psnr["random"], "val_gain_db": psnr["model"] - psnr["mid"],
+            "val_ssim": mean_ssim(ssims["model"]), "val_ssim_mid": mean_ssim(ssims["mid"]),
+            "val_ssim_random": mean_ssim(ssims["random"]),
             "val_msb_consistency": torch.cat(consistent).mean().item()}
 
 

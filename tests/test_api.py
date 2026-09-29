@@ -197,8 +197,8 @@ def test_analysis_rgb():
     recs = body["reconstructions"]
     assert [r["k"] for r in recs] == list(range(1, 9))
     assert recs[0]["bits"] == [7] and recs[2]["bits"] == [7, 6, 5]
-    assert recs[-1]["psnr"] == {"zero": None, "mid": None}  # lossless → infinite → null
-    assert recs[0]["psnr"]["mid"] > recs[0]["psnr"]["zero"]
+    assert recs[-1]["psnr"] == {"zero": None, "mid": None, "random": None}  # lossless → infinite → null
+    assert recs[0]["psnr"]["mid"] > recs[0]["psnr"]["random"] > recs[0]["psnr"]["zero"]
     assert _decode_data_url(recs[-1]["image"]).tolist() == arr.tolist()
 
 
@@ -248,11 +248,12 @@ def test_models_and_reconstruct(tmp_path, monkeypatch):
     arr = np.random.default_rng(3).integers(0, 256, (24, 20, 3), dtype=np.uint8)
     body = _post_reconstruct(_encode(Image.fromarray(arr, "RGB")))
     assert any("grayscale" in n for n in body["notes"])
-    assert [r["name"] for r in body["results"]] == ["zero", "mid", "tiny-unet"]
-    mid = body["results"][1]
+    assert [r["name"] for r in body["results"]] == ["zero", "mid", "random", "tiny-unet"]
+    zero, mid, random, model = body["results"]
     assert mid["psnr_gain"] == 0 and mid["msb_consistency"] == 1.0
-    assert body["results"][2]["kind"] == "model" and body["results"][2]["msb_consistency"] == 1.0
-    assert body["results"][0]["psnr_gain"] < 0
+    assert random["kind"] == "fill" and random["psnr_gain"] < 0 and random["msb_consistency"] == 1.0
+    assert model["kind"] == "model" and model["msb_consistency"] == 1.0
+    assert zero["psnr_gain"] < 0
     assert _decode_data_url(body["original"]).shape == (24, 20, 3)
 
 
@@ -269,4 +270,4 @@ def test_reconstruct_errors(tmp_path, monkeypatch):
     png8 = _encode(Image.new("L", (16, 16), 100))
     res = client.post("/api/reconstruct", files={"file": ("x.png", png8)}, data={"models": "nope"})
     assert res.status_code == 404
-    assert [r["name"] for r in _post_reconstruct(png8)["results"]] == ["zero", "mid"]
+    assert [r["name"] for r in _post_reconstruct(png8)["results"]] == ["zero", "mid", "random"]
