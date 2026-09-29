@@ -10,7 +10,7 @@ python -m msbgen.cli.<tool> --help
 | --- | --- |
 | [`analyze`](analyze.py) | Dataset-level bit-plane analysis → CSV, JSON and plots |
 | [`prepare_data`](prepare_data.py) | Download and convert datasets (DIV2K, Kodak) to grayscale `.npy` |
-| [`train`](train.py) | Train a deterministic baseline (CNN / U-Net) |
+| [`train`](train.py) | Train a baseline (CNN / U-Net) or the conditional diffusion model |
 | [`evaluate`](evaluate.py) | Score the fills (zero / mid / random) and trained checkpoints on a test set |
 | [`plot_runs`](plot_runs.py) | Plot training histories (loss, PSNR, SSIM, LR) and export them as CSV |
 
@@ -22,6 +22,13 @@ python -m msbgen.cli.train --preset unet-res            # → runs/unet-res/best
 python -m msbgen.cli.plot_runs                          # training curves → outputs/plots/
 python -m msbgen.cli.evaluate data/processed/kodak --models runs/*/best.pt --lpips
 uvicorn msbgen.main:app                                 # models appear in the web UI
+```
+
+The generative model (Milestone 3) uses the same tools:
+
+```shell
+python -m msbgen.cli.train --preset diffusion           # → runs/diffusion/best.pt
+python -m msbgen.cli.evaluate data/processed/kodak --models runs/*/best.pt --lpips --samples 4
 ```
 
 Every tool is a thin layer over [`msbgen.core`](../core/README.md). The numbers
@@ -198,21 +205,26 @@ extracts, and writes `data/processed/<name>/*.npy` (8-bit grayscale, BT.601) plu
 `manifest.json`. Finished steps are skipped, so re-running is instant. Details are
 in [`msbgen/data/README.md`](../data/README.md).
 
-## `train`: train a baseline
+## `train`: train a model
 
 ```shell
 python -m msbgen.cli.train --preset unet-res                 # PLAN baseline 4
 python -m msbgen.cli.train --preset cnn --steps 10000        # override any option
+python -m msbgen.cli.train --preset diffusion                # Milestone 3
 python -m msbgen.cli.train --resume runs/unet-res/last.pt --preset unet-res
 ```
 
-**Presets** (the PLAN.md baselines):
+**Presets:**
 
 | Preset | Model | Output | PLAN.md |
 | --- | --- | --- | --- |
 | `cnn` | `SimpleCNN` width 64, depth 8 (0.22 M params) | direct: predicts I | Baseline 2: pixelwise regression |
 | `unet` | `UNet` width 24, 4 levels (4.4 M params) | direct: predicts I | Baseline 3: U-Net |
 | `unet-res` | same U-Net | residual: predicts R = I − 128·B7 | Baseline 4: residual prediction |
+| `diffusion` | `MSBDiffusion`: `TimeUNet` width 32, 4 levels, 1 block (4.0 M params); EMA 0.999, 40k steps, validation every 2k | samples R ~ p(R \| B7) | Milestone 3: conditional diffusion |
+
+**`--resume` rebuilds the configuration from the command line**, so repeat the same
+preset and options (and the same `--steps`: the learning-rate schedule depends on it).
 
 **Options:**
 
@@ -220,15 +232,18 @@ python -m msbgen.cli.train --resume runs/unet-res/last.pt --preset unet-res
 | --- | --- | --- |
 | `--preset` | | One of the presets above |
 | `--name` | the preset name | Run name; output goes to `<out-dir>/<name>/` |
-| `--arch`, `--output` | from the preset | `cnn`/`unet`, `direct`/`residual` |
-| `--width`, `--depth`, `--levels` | from the preset | Model size |
+| `--kind` | from the preset | `regression` or `diffusion` |
+| `--arch`, `--output` | from the preset | Regression only: `cnn`/`unet`, `direct`/`residual` |
+| `--width`, `--depth`, `--levels`, `--blocks` | from the preset | Model size (`--depth`: CNN; `--blocks`: ResBlocks per resolution, diffusion) |
 | `--k` | 1 | Transmitted planes (the model input is B7 … B(8−k)) |
 | `--train`, `--val` | DIV2K train / valid | Folders of prepared `.npy` files (several allowed) |
-| `--steps` | 20000 | Optimiser steps |
+| `--steps` | 20000 (diffusion 40000) | Optimiser steps |
 | `--batch-size`, `--crop` | 16, 128 | Batch of random crops |
 | `--lr` | 2e-4 | Adam learning rate; 500-step warm-up, then cosine decay to 1e-6 |
-| `--loss` | mse | `mse` (as in PLAN.md) or `l1` |
-| `--val-every`, `--val-limit` | 1000, all | Validation interval / number of validation images |
+| `--loss` | mse | Regression only: `mse` (as in PLAN.md) or `l1` |
+| `--val-every`, `--val-limit` | 1000 (diffusion 2000), all | Validation interval / number of validation images |
+| `--ema` | 0 (diffusion 0.999) | Decay of an exponential moving average of the weights; validation and the saved inference weights use it. 0 = off |
+| `--val-sample-steps` | 25 | Diffusion: DDIM steps for the validation samples |
 | `--log-every` | 100 | Training-loss log interval |
 | `--workers` | 4 | DataLoader processes |
 | `--seed` | 0 | Makes the crop stream and initialisation reproducible |
@@ -246,6 +261,9 @@ training protects the machine itself:
   temperature (`psutil`).
 - When either reaches its max, it **saves `last.pt`**, then pauses until *both* have
   cooled to their resume temperature.
+- It is also checked inside validation, after every batch and every denoising step.
+  Diffusion validation samples every crop, which is minutes of full load: the
+  laptop once shut down during an unguarded one.
 - The gap between the two thresholds (hysteresis) stops it flapping on and off.
 - Every training log line shows the current temperatures. `log.jsonl` records
   `gpu_temp`, `cpu_temp` and the total `paused_s`, and `it_per_s` excludes the pauses.
@@ -254,7 +272,9 @@ training protects the machine itself:
 The code is in [`msbgen/utils`](../utils/): `gpu_guard.py`, `cpu_guard.py` and
 `thermal.py`. If training pauses very often, lower the load with a smaller
 `--batch-size` or fewer `--workers`, or raise the limits a little. The GPU's own
-slowdown point is 100 °C.
+slowdown point is 100 °C. The diffusion model runs hotter than the baselines: on the
+MX350 it pauses for roughly 15–20 s after every ~20 s of training, which makes a run
+about 1.8× longer than its compute time.
 
 **What a run writes** (`runs/<name>/`, git-ignored):
 
@@ -263,14 +283,17 @@ slowdown point is 100 °C.
 | `config.json` | Full training and model configuration |
 | `log.jsonl` | The full training history (see below) |
 | `last.pt` | Latest checkpoint, written at every validation, before every thermal pause, and on **Ctrl-C** |
-| `best.pt` | Checkpoint with the best validation PSNR; this is what `evaluate` and the web app use |
+| `best.pt` | Best checkpoint so far: highest validation PSNR (regression) or lowest validation loss (diffusion). This is what `evaluate` and the web app use |
+
+With EMA (diffusion), a checkpoint's `state_dict` holds the EMA weights and
+`train_state_dict` the raw weights that `--resume` continues from.
 
 **Training history (`log.jsonl`)** has one JSON object per line, of two kinds:
 
 | Record | When | Fields |
 | --- | --- | --- |
-| training | every `--log-every` steps | `step`, `epoch`, `loss` (mean over those steps), `train_psnr` (PSNR of that mean MSE), `lr`, `it_per_s`, `gpu_temp`, `cpu_temp`, `paused_s` |
-| validation | step 0, then every `--val-every` steps | `step`, `epoch`, `val_loss`, `val_psnr`, `val_psnr_mid`, `val_psnr_random`, `val_gain_db`, `val_ssim`, `val_ssim_mid`, `val_ssim_random`, `val_msb_consistency`, `best_val_psnr` |
+| training | every `--log-every` steps | `step`, `epoch`, `loss` (mean over those steps), `train_psnr` (PSNR of that mean MSE; `null` for diffusion), `lr`, `it_per_s`, `gpu_temp`, `cpu_temp`, `paused_s` |
+| validation | step 0, then every `--val-every` steps | `step`, `epoch`, `val_loss`, `val_psnr`, `val_psnr_mid`, `val_psnr_random`, `val_gain_db`, `val_ssim`, `val_ssim_mid`, `val_ssim_random`, `val_msb_consistency`, `best_val_psnr` (regression) or `best_val_loss` (diffusion) |
 
 - Training counts steps, not epochs. `epoch` = pixels seen / pixels in the training
   set, so it is fractional: 20k steps × 16 crops of 128² ≈ 2.4 epochs of DIV2K.
@@ -283,12 +306,24 @@ slowdown point is 100 °C.
 **Validation** uses one 256×256 centre crop per DIV2K-valid image. It reports the
 model's mean PSNR, the midpoint and random fills' PSNR and SSIM on the same crops
 (the random fill uses a fixed seed, so it is identical at every validation), and
-the **gain in dB** over the midpoint fill, which is the number that matters. If the gain isn't clearly positive, the
-model has learned nothing beyond the constant fill.
+the **gain in dB** over the midpoint fill, which is the number that matters for
+regression. If the gain isn't clearly positive, the model has learned nothing beyond
+the constant fill.
+
+**Diffusion validation** is different in two ways:
+
+- `val_loss` is the v-prediction loss with fixed t and noise per crop, so it is
+  comparable between validations. It selects `best.pt`.
+- `val_psnr` / `val_ssim` are of **one sample** per crop (`--val-sample-steps` DDIM
+  steps, fixed noise). A good generative model should end up about 3 dB *below* the
+  regression U-Net on PSNR, near the random fill or above it, with a negative
+  `val_gain_db`. See [`msbgen/models/README.md`](../models/README.md#why-a-sample-scores-lower-psnr).
+  Watch SSIM and the loss instead.
 
 On the MX350 laptop GPU, 20k steps take about 1–1.5 h for the U-Net and about
-1.7 h for the CNN. See [`msbgen/models/README.md`](../models/README.md) for
-measured speeds.
+1.7 h for the CNN. The diffusion preset's 40k steps take about 5 h of compute, plus
+validations and thermal pauses: plan for 9–10 h. See
+[`msbgen/models/README.md`](../models/README.md) for measured speeds.
 
 ## `plot_runs`: training curves
 
@@ -329,10 +364,27 @@ Every method gets **only the top-k bits** of each image (through the
 `Reconstructor` interface) and is scored against the original. The zero, midpoint
 and random fills are included as baselines by default.
 
+**Stochastic methods** (random fill, diffusion) are scored on their first sample
+(seed 0). With `--samples N` they are drawn N times (seeds 0 … N−1), which adds
+two metrics:
+
+- `psnr_avg`: the PSNR of the **average** of the N samples. For a well-calibrated
+  generative model it rises towards the regression U-Net's PSNR as N grows, because
+  the average of many samples approximates the MMSE estimate. For the random fill
+  it approaches the midpoint fill.
+- `diversity`: the mean per-pixel standard deviation across the samples, in
+  intensity levels. 0 means every sample is identical.
+
+The thermal guard is checked between images and after every diffusion denoising
+step.
+
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `data` | required | Folder of prepared `.npy` files or ordinary images (converted to grayscale) |
-| `--models` | none | Checkpoints; each is named after its run folder |
+| `--models` | none | Checkpoints (regression or diffusion); each is named after its run folder |
+| `--samples N` | 1 | Draws per image for stochastic methods |
+| `--sample-steps` | checkpoint's (50) | Diffusion: DDIM steps |
+| `--eta` | checkpoint's (0) | Diffusion: DDIM eta; 0 = deterministic given the starting noise, 1 = fresh noise every step |
 | `--k` | 1 | Transmitted planes; models trained for another k are skipped |
 | `--fills` | `zero mid random` | Fill baselines to include |
 | `--lpips` | off | Also compute LPIPS (downloads AlexNet weights once) |
@@ -341,15 +393,17 @@ and random fills are included as baselines by default.
 | `--save-images N` | 4 | Save reconstructions and a comparison strip for the first N images |
 | `--out DIR` | `outputs/eval/<data folder name>` | Output folder |
 | `--device` | auto | `cuda` / `cpu` |
+| `--no-thermal-guard` | off | Don't pause when the GPU / CPU is hot |
 
 **Outputs:**
 
 | File | Content |
 | --- | --- |
-| `per_image.csv` | `image, method, psnr, ssim, lpips, mae, msb_consistency` |
-| `summary.json` | Per method: mean and std of each metric over images, plus checkpoint path, step and model config |
-| `images/<image>_<method>.png` | Rounded 8-bit reconstructions |
+| `per_image.csv` | `image, method, psnr, ssim, lpips, mae, msb_consistency, psnr_avg, diversity, time_s` (`time_s`: seconds for one reconstruction) |
+| `summary.json` | Per method: mean and std of each metric over images, plus checkpoint path, step, model config and, for diffusion, `sample_steps` and `eta` |
+| `images/<image>_<method>.png` | Rounded 8-bit reconstructions (sample 0 for stochastic methods) |
 | `images/<image>_compare.png` | Original and every method side by side, labelled with PSNR |
+| `images/<image>_<method>_samples.png` | With `--samples` > 1: original, every sample, their mean and their per-pixel std × 4 |
 
 A summary table is printed as well. `msb_consistency` is the fraction of pixels
 whose reconstruction keeps the transmitted bits. It is always 1 for the fills and

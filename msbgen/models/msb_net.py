@@ -13,6 +13,7 @@ so the transmitted planes are always reproduced exactly (MSB consistency = 1).
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from typing import ClassVar
 
 import torch
 import torch.nn.functional as F
@@ -25,6 +26,8 @@ OUTPUT_MODES = ("direct", "residual")
 
 @dataclass
 class ModelConfig:
+    kind: ClassVar[str] = "regression"
+
     arch: str = "unet"  # "cnn" or "unet"
     output: str = "residual"  # "direct" or "residual"
     k: int = 1  # number of transmitted planes
@@ -44,7 +47,25 @@ class ModelConfig:
         return asdict(self)
 
 
+def encode_planes(top: torch.Tensor, k: int, bit_depth: int) -> torch.Tensor:
+    """(B, C, H, W) integer-valued top-k image → (B, C·k, H, W) planes as ±0.5, MSB first."""
+    top = top.to(torch.int32)
+    planes = [((top >> (bit_depth - 1 - i)) & 1) for i in range(k)]
+    return torch.stack(planes, dim=2).flatten(1, 2).float() - 0.5
+
+
+def pad_to_multiple(x: torch.Tensor, m: int) -> torch.Tensor:
+    """Pad H and W at the bottom / right up to a multiple of m (reflect if possible)."""
+    h, w = x.shape[-2:]
+    pad_h, pad_w = (-h) % m, (-w) % m
+    if not (pad_h or pad_w):
+        return x
+    return F.pad(x, (0, pad_w, 0, pad_h), mode="reflect" if min(h, w) > max(pad_h, pad_w) else "replicate")
+
+
 class MSBNet(nn.Module):
+    kind = "regression"  # stored in checkpoints; see msbgen.models.diffusion for "diffusion"
+
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
@@ -55,10 +76,7 @@ class MSBNet(nn.Module):
 
     def encode_input(self, top: torch.Tensor) -> torch.Tensor:
         """(B, C, H, W) integer-valued top-k image → (B, C·k, H, W) planes as ±0.5."""
-        n, k = self.config.bit_depth, self.config.k
-        top = top.to(torch.int32)
-        planes = [((top >> (n - 1 - i)) & 1) for i in range(k)]  # MSB first
-        return torch.stack(planes, dim=2).flatten(1, 2).float() - 0.5
+        return encode_planes(top, self.config.k, self.config.bit_depth)
 
     def forward(self, top: torch.Tensor) -> torch.Tensor:
         """top: (B, C, H, W) with only the top k bits set (any integer or float dtype).
@@ -67,11 +85,7 @@ class MSBNet(nn.Module):
         """
         x = self.encode_input(top)
         h, w = x.shape[-2:]
-        m = getattr(self.backbone, "multiple", 1)
-        pad_h, pad_w = (-h) % m, (-w) % m
-        if pad_h or pad_w:
-            x = F.pad(x, (0, pad_w, 0, pad_h), mode="reflect" if min(h, w) > max(pad_h, pad_w) else "replicate")
-        z = self.backbone(x)[..., :h, :w]
+        z = self.backbone(pad_to_multiple(x, getattr(self.backbone, "multiple", 1)))[..., :h, :w]
         if self.config.output == "direct":
             return torch.sigmoid(z)
         return (top.float() + torch.sigmoid(z) * self.residual_max) / self.max_value

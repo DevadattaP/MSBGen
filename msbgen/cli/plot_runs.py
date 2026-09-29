@@ -29,7 +29,7 @@ import numpy as np
 
 TRAIN_FIELDS = ["loss", "train_psnr", "lr", "it_per_s", "gpu_temp", "cpu_temp", "paused_s"]
 VAL_FIELDS = ["val_loss", "val_psnr", "val_psnr_mid", "val_psnr_random", "val_gain_db", "val_ssim", "val_ssim_mid",
-              "val_ssim_random", "val_msb_consistency", "best_val_psnr"]
+              "val_ssim_random", "val_msb_consistency", "best_val_psnr", "best_val_loss"]
 BASELINES = {"mid": ("--", "midpoint fill"), "random": (":", "random fill")}  # fill → (line style, label)
 
 

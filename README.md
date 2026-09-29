@@ -28,7 +28,8 @@ research questions and milestones.
 | Bit-plane explorer web app (slice & visualise planes) | ✅ done |
 | Bit-plane analysis (entropy, correlations, k-MSB reconstruction) | ✅ done |
 | Deterministic baselines (CNN / U-Net, residual prediction) | ✅ done: [results](#results-kodak) |
-| Conditional diffusion / flow matching / normalizing flow | ⏳ |
+| Conditional diffusion on the residual, p(R \| B7) | 🚧 code done, smoke-tested; full training run pending |
+| Flow matching / normalizing flow | ⏳ |
 | Multi-MSB experiments, entropy coding, final codec | ⏳ |
 
 ### Bit-plane explorer
@@ -276,6 +277,57 @@ for the codec stage.
 The per-image scores and comparison strips are in `outputs/eval/kodak/`
 (`per_image.csv`, `summary.json`, `images/`); reproduce them with step 4 above.
 
+### Conditional diffusion
+
+The baselines predict the *average* of all images consistent with $B_7$, which is
+blurry. This milestone learns the *distribution* instead: a conditional diffusion
+model of the residual,
+
+$$
+\hat I = 128\,B_7 + \hat R, \qquad \hat R \sim p_\theta(R \mid B_7)
+$$
+
+so every sample keeps the transmitted bit exactly (MSB consistency 1), and
+different noise seeds give different plausible images.
+
+| | |
+| --- | --- |
+| Network | Time-conditioned U-Net (ResBlocks, GroupNorm, no attention), width 32, 4 levels: 4.0 M params. Input: noisy residual + $B_7$ planes |
+| Diffusion | Continuous-time cosine schedule, **v-prediction**, DDIM sampler (50 steps; `eta` 0 = deterministic given the noise, 1 = fresh noise every step) |
+| Training | Same DIV2K crops, optimiser and LR schedule as the baselines; 40k steps, EMA 0.999; `best.pt` = lowest validation loss |
+| Evaluation | `--samples N`: PSNR of the average of N samples (`psnr_avg`) and per-pixel spread across samples (`diversity`) |
+
+```shell
+# Train (≈ 5 h of compute on the MX350; with validations and thermal pauses plan for 9–10 h)
+python -m msbgen.cli.train --preset diffusion
+
+# If it stops (Ctrl-C, shutdown), resume with the same options
+python -m msbgen.cli.train --preset diffusion --resume runs/diffusion/last.pt
+
+# Evaluate against the baselines, 4 samples per image
+python -m msbgen.cli.evaluate data/processed/kodak --models runs/*/best.pt --lpips --samples 4
+```
+
+**What to expect.** A sample from the true posterior has *twice* the MSE of the
+posterior mean, so even a perfect model scores about **3 dB below** the regression
+U-Net on PSNR (≈ 15.6 dB on Kodak), below the midpoint fill. The random fill shows
+the same effect with a uniform prior (−3.19 dB). The diffusion model has to win
+elsewhere:
+
+- lower LPIPS than the regression models
+- SSIM and LPIPS far better than the random fill
+- `psnr_avg` climbing back towards the U-Net's PSNR as the number of samples grows
+- non-zero `diversity`
+
+The derivation and details are in
+[msbgen/models/README.md](msbgen/models/README.md#conditional-diffusion-diffusionpy).
+
+**Thermal guard.** Sampling is minutes of sustained full GPU load, and the laptop
+shut down once during an unguarded diffusion validation. The guard is now checked
+after every denoising step in training validation, `evaluate` and the web app.
+
+**Results:** to be filled in once the full training run finishes.
+
 ## Project structure
 
 ```shell
@@ -290,13 +342,13 @@ MSBGen/
 │   │   ├── metrics.py     # PSNR, SSIM, MAE
 │   │   └── image_io.py    # decode uploads → grayscale/RGB uint8/uint16 arrays, PNG encoding
 │   ├── data/              # Dataset download/preparation + training crops (see data/README.md)
-│   ├── models/            # CNN / U-Net, checkpoints, ModelReconstructor, LPIPS (see models/README.md)
-│   ├── training.py        # training loop (validation vs midpoint fill, checkpoints, resume)
+│   ├── models/            # CNN / U-Net, diffusion, checkpoints, reconstructors, LPIPS (see models/README.md)
+│   ├── training.py        # training loop: regression + diffusion, EMA, validation vs fills, checkpoints, resume
 │   ├── utils/             # gpu_guard / cpu_guard / thermal: pause training when too hot
 │   ├── cli/               # Command-line tools (see cli/README.md)
 │   │   ├── analyze.py     # dataset-level analysis → CSV / JSON / plots
 │   │   ├── prepare_data.py  # download + convert DIV2K / Kodak
-│   │   ├── train.py       # train a baseline
+│   │   ├── train.py       # train a baseline or the diffusion model
 │   │   ├── plot_runs.py   # training curves + history CSV
 │   │   └── evaluate.py    # score fills + checkpoints on a test set
 │   ├── api/
@@ -322,7 +374,7 @@ docs:
 
 - [msbgen/core/README.md](msbgen/core/README.md): bit-planes, analysis,
   reconstructors, metrics
-- [msbgen/models/README.md](msbgen/models/README.md): networks, checkpoints, LPIPS
+- [msbgen/models/README.md](msbgen/models/README.md): networks, the diffusion model, checkpoints, LPIPS
 - [msbgen/data/README.md](msbgen/data/README.md): datasets and preparation
 - [msbgen/cli/README.md](msbgen/cli/README.md): every command, its options and
   output formats
@@ -435,14 +487,17 @@ lossless PSNR (k = `bit_depth`) is `null`. SSIM is `null` for images smaller tha
 ### `GET /api/models`
 
 The trained checkpoints found in `MSBGEN_MODELS_DIR`:
-`{"torch_available", "models_dir", "models": [{"name", "label", "arch", "output", "k", "bit_depth", "channels", "parameters", "step", "val_psnr", "val_gain_db"}]}`.
+`{"torch_available", "models_dir", "models": [{"name", "label", "kind", "arch", "output", "k", "bit_depth", "channels", "parameters", "step", "val_psnr", "val_gain_db"}]}`.
+`kind` is `regression` or `diffusion` (`arch` `tunet`); for diffusion, `val_psnr` is of one sample.
 The list is re-scanned on every call, so new runs appear without a restart.
 
 ### `POST /api/reconstruct`
 
 Multipart `file`, plus optional form fields `k` (default 1) and `models`
 (comma-separated names; default: every compatible model). The image must be
-8-bit; colour images are converted to grayscale, with a note. Returns the image
+8-bit; colour images are converted to grayscale, with a note. Diffusion models
+return their seed-0 sample (50 steps; about 11 s for a Kodak-sized image on the
+MX350, and the request waits if the thermal guard pauses). Returns the image
 fields plus:
 
 ```json

@@ -205,7 +205,7 @@ async def analysis(file: UploadFile) -> AnalysisResponse:
 def _model_info(m) -> ModelInfo:
     c = m.config
     return ModelInfo(
-        name=m.name, label=m.label, arch=c.arch, output=c.output, k=c.k, bit_depth=c.bit_depth,
+        name=m.name, label=m.label, kind=m.model.kind, arch=c.arch, output=c.output, k=c.k, bit_depth=c.bit_depth,
         channels=c.channels, parameters=m.model.num_parameters(), step=m.step,
         val_psnr=_finite(m.metrics.get("val_psnr")), val_gain_db=_finite(m.metrics.get("val_gain_db")),
     )

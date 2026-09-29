@@ -94,14 +94,15 @@ class AnalysisResponse(ImageInfo):
 class ModelInfo(BaseModel):
     name: str = Field(description="Run name, used to select the model")
     label: str
-    arch: str = Field(description="'cnn' or 'unet'")
+    kind: str = Field(description="'regression' (one deterministic estimate) or 'diffusion' (a sample of p(R | B7))")
+    arch: str = Field(description="'cnn', 'unet' or 'tunet' (time-conditioned U-Net, diffusion)")
     output: str = Field(description="'direct' (predicts I) or 'residual' (predicts the missing bits)")
     k: int = Field(description="Number of transmitted MSB planes the model expects")
     bit_depth: int
     channels: int
     parameters: int
     step: int = Field(description="Training step of the checkpoint")
-    val_psnr: float | None = Field(description="Validation PSNR at that step (dB)")
+    val_psnr: float | None = Field(description="Validation PSNR at that step (dB); for diffusion, of one sample")
     val_gain_db: float | None = Field(description="Validation PSNR gain over midpoint fill (dB)")
 
 

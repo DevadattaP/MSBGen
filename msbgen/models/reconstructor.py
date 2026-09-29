@@ -1,30 +1,62 @@
-"""A trained MSBNet as a `Reconstructor`, with tiled inference for large images."""
+"""Trained checkpoints as `Reconstructor`s, with tiled inference for large images.
+
+    load_reconstructor(path)   → ModelReconstructor (regression) or DiffusionReconstructor
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import torch
 
 from msbgen.core.reconstruction import Reconstructor
-from msbgen.models.checkpoint import load_model
+from msbgen.models.checkpoint import load_model, read_checkpoint
 
 
 def default_device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-class ModelReconstructor(Reconstructor):
-    """Runs a checkpoint on the top-k image.
+def run_tiled(fn: Callable[[torch.Tensor], torch.Tensor], x: torch.Tensor, tile: int, margin: int) -> torch.Tensor:
+    """Apply a fully convolutional `fn` to x (B, C, H, W) in tiles, keeping memory bounded.
 
-    Images larger than `tile` pixels on a side are processed in overlapping tiles:
-    each tile is run with `margin` extra context on every side and only its centre is
-    kept, so there are no visible seams and memory stays bounded.
+    Each tile is run with `margin` extra context on every side and only its centre is
+    kept, so there are no visible seams. The output stays on the device `fn` returns it on.
     """
+    h, w = x.shape[-2:]
+    if max(h, w) <= tile:
+        return fn(x)
+    out = None
+    m = margin
+    for y0 in range(0, h, tile):
+        for x0 in range(0, w, tile):
+            y1, x1 = min(y0 + tile, h), min(x0 + tile, w)
+            ya, xa = max(y0 - m, 0), max(x0 - m, 0)
+            yb, xb = min(y1 + m, h), min(x1 + m, w)
+            pred = fn(x[..., ya:yb, xa:xb])
+            if out is None:
+                out = pred.new_empty((*pred.shape[:-2], h, w))
+            out[..., y0:y1, x0:x1] = pred[..., y0 - ya : y1 - ya, x0 - xa : x1 - xa]
+    return out
 
-    def __init__(self, checkpoint: Path, device: str | torch.device | None = None,
-                 name: str | None = None, tile: int = 512, margin: int = 64):
+
+def _to_tensor(top: np.ndarray) -> torch.Tensor:
+    """(H, W) or (H, W, C) → (1, C, H, W) float32."""
+    x = torch.from_numpy(np.ascontiguousarray(top.astype(np.float32)))
+    return x[None, None] if top.ndim == 2 else x.permute(2, 0, 1)[None]
+
+
+def _to_estimate(out: torch.Tensor, max_value: float, like: np.ndarray) -> np.ndarray:
+    """(1, C, H, W) in [0, 1] → float64 estimate shaped like `like`."""
+    est = out[0].cpu().double().numpy() * max_value
+    return est[0] if like.ndim == 2 else np.moveaxis(est, 0, -1)
+
+
+class _CheckpointReconstructor(Reconstructor):
+    def __init__(self, checkpoint: Path, device: str | torch.device | None, name: str | None,
+                 tile: int, margin: int):
         self.path = Path(checkpoint)
         self.device = torch.device(device) if device else default_device()
         self.model, payload = load_model(self.path, self.device)
@@ -32,40 +64,86 @@ class ModelReconstructor(Reconstructor):
         self.step = payload["step"]
         self.metrics = payload.get("metrics", {})
         self.name = name or self.path.parent.name
-        arch = "U-Net" if self.config.arch == "unet" else "CNN"
-        self.label = f"{arch} ({self.config.output})"
         self.tile, self.margin = tile, margin
 
     def supports(self, k: int, bit_depth: int, channels: int) -> bool:
         c = self.config
         return (k, bit_depth, channels) == (c.k, c.bit_depth, c.channels)
 
-    @torch.no_grad()
-    def reconstruct(self, top: np.ndarray, k: int, bit_depth: int) -> np.ndarray:
+    def _check(self, top: np.ndarray, k: int, bit_depth: int) -> None:
         if not self.supports(k, bit_depth, 1 if top.ndim == 2 else top.shape[-1]):
             raise ValueError(f"{self.name} was trained for k={self.config.k}, {self.config.bit_depth}-bit, "
                              f"{self.config.channels} channel(s)")
-        squeeze = top.ndim == 2
-        x = torch.from_numpy(np.ascontiguousarray(top.astype(np.float32)))
-        x = x[None, None] if squeeze else x.permute(2, 0, 1)[None]
-        out = self._run_tiled(x)[0]  # (C, H, W) in [0, 1]
-        est = out.double().numpy() * self.model.max_value
-        return est[0] if squeeze else np.moveaxis(est, 0, -1)
 
-    def _run_tiled(self, x: torch.Tensor) -> torch.Tensor:
-        h, w = x.shape[-2:]
-        if max(h, w) <= self.tile:
-            return self.model(x.to(self.device)).cpu()
-        out = torch.empty_like(x)
-        t, m = self.tile, self.margin
-        for y0 in range(0, h, t):
-            for x0 in range(0, w, t):
-                y1, x1 = min(y0 + t, h), min(x0 + t, w)
-                ya, xa = max(y0 - m, 0), max(x0 - m, 0)
-                yb, xb = min(y1 + m, h), min(x1 + m, w)
-                pred = self.model(x[..., ya:yb, xa:xb].to(self.device)).cpu()
-                out[..., y0:y1, x0:x1] = pred[..., y0 - ya : y1 - ya, x0 - xa : x1 - xa]
-        return out
+
+class ModelReconstructor(_CheckpointReconstructor):
+    """Runs a regression checkpoint (CNN / U-Net) on the top-k image."""
+
+    def __init__(self, checkpoint: Path, device: str | torch.device | None = None,
+                 name: str | None = None, tile: int = 512, margin: int = 64):
+        super().__init__(checkpoint, device, name, tile, margin)
+        arch = "U-Net" if self.config.arch == "unet" else "CNN"
+        self.label = f"{arch} ({self.config.output})"
+
+    @torch.no_grad()
+    def reconstruct(self, top: np.ndarray, k: int, bit_depth: int) -> np.ndarray:
+        self._check(top, k, bit_depth)
+        out = run_tiled(lambda t: self.model(t.to(self.device)).cpu(), _to_tensor(top), self.tile, self.margin)
+        return _to_estimate(out, self.model.max_value, top)
+
+
+class DiffusionReconstructor(_CheckpointReconstructor):
+    """Samples a diffusion checkpoint: Î = top + R̂, R̂ ~ p(R | top).
+
+    `reconstruct` draws with `seed`; `sample(..., seed)` draws with any seed. The noise
+    comes from a CPU generator, so a given seed gives the same image on CPU and GPU.
+
+    Images larger than `tile` are tiled at every denoising step (the network is applied
+    per tile, the sampler state covers the whole image). The network's GroupNorm layers
+    normalise over their whole input, so tiles see slightly different statistics than a
+    full pass; the default tile (1024) keeps Kodak-sized images in one piece.
+    """
+
+    stochastic = True
+
+    def __init__(self, checkpoint: Path, device: str | torch.device | None = None,
+                 name: str | None = None, tile: int = 1024, margin: int = 64,
+                 steps: int | None = None, eta: float | None = None, seed: int = 0,
+                 on_step: Callable[[], object] | None = None):
+        super().__init__(checkpoint, device, name, tile, margin)
+        self.on_step = on_step  # called after every denoising step, e.g. a thermal-guard check
+        self.steps = steps or self.config.sample_steps
+        self.eta = self.config.eta if eta is None else eta
+        self.seed = seed
+        self.label = "Diffusion (residual)"
+
+    def reconstruct(self, top: np.ndarray, k: int, bit_depth: int) -> np.ndarray:
+        return self.sample(top, k, bit_depth, self.seed)
+
+    @torch.no_grad()
+    def sample(self, top: np.ndarray, k: int, bit_depth: int, seed: int) -> np.ndarray:
+        self._check(top, k, bit_depth)
+        x = _to_tensor(top).to(self.device)
+        c = x.shape[1]
+
+        def predict(x_t: torch.Tensor, t: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+            return run_tiled(lambda inp: self.model.predict(inp[:, :c], t[:1], inp[:, c:]),
+                             torch.cat([x_t, cond], dim=1), self.tile, self.margin)
+
+        gen = torch.Generator().manual_seed(seed)
+        out = self.model.sample(x, steps=self.steps, eta=self.eta, generator=gen, predict=predict,
+                                on_step=self.on_step)
+        return _to_estimate(out, self.model.max_value, top)
+
+
+def load_reconstructor(checkpoint: Path, device: str | torch.device | None = None, **kwargs) -> _CheckpointReconstructor:
+    """The right `Reconstructor` for a checkpoint. Diffusion accepts `steps`, `eta`, `seed`, `on_step`."""
+    kind = read_checkpoint(checkpoint)["model_kind"]
+    if kind == "diffusion":
+        return DiffusionReconstructor(checkpoint, device, **kwargs)
+    for key in ("steps", "eta", "seed", "on_step"):
+        kwargs.pop(key, None)
+    return ModelReconstructor(checkpoint, device, **kwargs)
 
 
 def discover_checkpoints(root: Path, filename: str = "best.pt") -> list[Path]:

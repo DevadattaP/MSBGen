@@ -33,9 +33,15 @@ class Reconstructor(ABC):
 
     name: str  # short id used in tables / APIs, e.g. "mid"
     label: str  # human-readable, e.g. "Midpoint fill"
+    stochastic: bool = False  # True: `sample` gives a different estimate for each seed
 
     def supports(self, k: int, bit_depth: int, channels: int) -> bool:
         return True
+
+    def sample(self, top: np.ndarray, k: int, bit_depth: int, seed: int) -> np.ndarray:
+        """One draw for stochastic methods (same contract as `reconstruct`); deterministic
+        methods ignore `seed`. `reconstruct` returns the draw for the method's default seed."""
+        return self.reconstruct(top, k, bit_depth)
 
     @abstractmethod
     def reconstruct(self, top: np.ndarray, k: int, bit_depth: int) -> np.ndarray:
@@ -72,12 +78,16 @@ class RandomFill(Reconstructor):
     """
 
     name, label = "random", "Random fill"
+    stochastic = True
 
     def __init__(self, seed: int = 0):
         self.seed = seed
 
     def reconstruct(self, top, k, bit_depth):
-        rng = np.random.default_rng(self.seed)
+        return self.sample(top, k, bit_depth, self.seed)
+
+    def sample(self, top, k, bit_depth, seed):
+        rng = np.random.default_rng(seed)
         return top.astype(np.float64) + rng.integers(0, 1 << (bit_depth - k), size=top.shape)
 
 
