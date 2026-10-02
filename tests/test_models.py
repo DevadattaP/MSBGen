@@ -151,6 +151,49 @@ def test_evaluate_cli(tmp_path, capsys):
     assert "mid" in capsys.readouterr().out
 
 
+def test_evaluate_cli_dists_and_kid(tmp_path, monkeypatch, capsys):
+    from msbgen.cli.evaluate import main
+    from msbgen.models import perceptual
+
+    class FakeDISTS:  # the real ones download VGG / Inception weights
+        def __init__(self, device=None):
+            pass
+
+        def __call__(self, reference, estimate, data_range):
+            return float(np.abs(reference - estimate).mean() / data_range)
+
+    class FakeFeatures:
+        def __init__(self, device=None):
+            pass
+
+        def __call__(self, images, data_range):  # 4×4 block means as "features"
+            n, h, w = images.shape
+            return images.reshape(n, 4, h // 4, 4, w // 4).mean((2, 4)).reshape(n, 16) / data_range
+
+    monkeypatch.setattr(perceptual, "DISTS", FakeDISTS)
+    monkeypatch.setattr(perceptual, "InceptionFeatures", FakeFeatures)
+    data = _dataset(tmp_path / "test", count=2)  # 48×64: 12 + 6 patches of 16 px per image
+    out = tmp_path / "out"
+    assert main([str(data), "--fills", "mid", "random", "--samples", "2", "--dists", "--kid", "--kid-patch", "16",
+                 "--out", str(out), "--save-images", "0", "--no-thermal-guard"]) == 0
+    summary = json.loads((out / "summary.json").read_text())
+    assert summary["meta"]["kid_patch"] == 16
+    mid, rand = summary["methods"]["mid"], summary["methods"]["random"]
+    assert 0 < mid["dists"]["mean"] < rand["dists"]["mean"]
+    assert mid["kid"]["reference_patches"] == mid["kid"]["patches"] == 36
+    assert rand["kid"]["patches"] == 72  # every sample of a stochastic method
+    assert "KID e3" in capsys.readouterr().out
+    assert "dists" in (out / "per_image.csv").read_text().splitlines()[0]
+    assert rand["kid"]["subset_size"] == 18 and rand["kid"]["std"] > 0  # half the reference patches
+
+    from msbgen.cli.plot_eval import main as plot_main
+
+    plots = tmp_path / "plots"
+    assert plot_main([str(out), "--out", str(plots), "--pair", "random", "mid"]) == 0
+    assert sorted(p.name for p in plots.iterdir()) == ["eval_out_metrics.png", "eval_out_paired.png",
+                                                       "eval_out_perception.png"]
+
+
 def test_prepare_archive_source(tmp_path):
     from msbgen.data.prepare import prepare
     from msbgen.data.sources import Download, Source

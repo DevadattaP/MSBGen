@@ -94,6 +94,14 @@ class RandomFill(Reconstructor):
 FILL_RECONSTRUCTORS: dict[str, Reconstructor] = {r.name: r for r in (ZeroFill(), MidpointFill(), RandomFill())}
 
 
+def summary_method_kind(name: str, entry: dict) -> str:
+    """'fill', 'regression' or 'generative' for a method entry of an evaluation summary.json
+    (only generative models record sampler settings such as `sample_steps`)."""
+    if name in FILL_RECONSTRUCTORS:
+        return "fill"
+    return "generative" if "sample_steps" in entry else "regression"
+
+
 def round_estimate(estimate: np.ndarray, bit_depth: int) -> np.ndarray:
     """Round half up and clip to the valid range (what you would store or display)."""
     rounded = np.clip(np.floor(estimate + 0.5), 0, (1 << bit_depth) - 1)

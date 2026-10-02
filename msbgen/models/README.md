@@ -9,10 +9,12 @@ analysis tools still work without torch installed.
 | --- | --- |
 | [`nets.py`](nets.py) | Backbones: `SimpleCNN`, `UNet` and the time-conditioned `TimeUNet` |
 | [`msb_net.py`](msb_net.py) | `MSBNet`: backbone + input encoding + output mode; `ModelConfig` (regression) |
+| [`generative.py`](generative.py) | `ResidualGenerator`: what the generative models share (residual scaling, $B_7$ conditioning, `TimeUNet`) |
 | [`diffusion.py`](diffusion.py) | `MSBDiffusion`: conditional diffusion on the residual, p(R \| B7); `DiffusionConfig` |
-| [`checkpoint.py`](checkpoint.py) | `save_checkpoint`, `load_model`, `read_checkpoint`, `build_model` |
-| [`reconstructor.py`](reconstructor.py) | `ModelReconstructor` / `DiffusionReconstructor` (checkpoints as `Reconstructor`s, tiled inference), `load_reconstructor`, `discover_checkpoints` |
-| [`perceptual.py`](perceptual.py) | `LPIPS` perceptual metric wrapper |
+| [`flow.py`](flow.py) | `MSBFlow`: conditional flow matching on the residual, p(R \| B7); `FlowConfig` |
+| [`checkpoint.py`](checkpoint.py) | `save_checkpoint`, `load_model`, `read_checkpoint`, `build_model`; `GENERATIVE_KINDS` |
+| [`reconstructor.py`](reconstructor.py) | `ModelReconstructor` / `DiffusionReconstructor` / `FlowReconstructor` (checkpoints as `Reconstructor`s, tiled inference), `load_reconstructor`, `discover_checkpoints` |
+| [`perceptual.py`](perceptual.py) | Deep-feature metrics: `LPIPS`, `DISTS`, and `InceptionFeatures` for KID |
 
 The training loop is in [`msbgen/training.py`](../training.py), and the
 command-line entry points are in [`msbgen/cli`](../cli/README.md).
@@ -199,6 +201,58 @@ model, ckpt = load_model("runs/unet-res/best.pt", device="cuda")   # MSBNet or M
 Writes are atomic (a temporary file, then rename), so an interrupted run never
 leaves a corrupt checkpoint.
 
+## Conditional flow matching (`flow.py`)
+
+PLAN.md Milestone 4: the same task as the diffusion model, $\hat R \sim p_\theta(R \mid B_7)$,
+with the same residual, conditioning, `TimeUNet` and training recipe (both subclass
+`ResidualGenerator` in [`generative.py`](generative.py)). Only the way noise becomes a
+residual differs, so a comparison between the two isolates that choice.
+
+**Probability path.** A straight line between the residual and Gaussian noise
+(rectified flow, the conditional optimal-transport path), with $t = 0$ the data and
+$t = 1$ the noise, as in the diffusion model:
+
+$$
+x_t = (1 - t)\, r + t\, \varepsilon, \qquad
+\frac{dx_t}{dt} = \varepsilon - r
+$$
+
+**Network and loss.** The `TimeUNet` gets $[x_t, B_7 \text{ planes}]$ and $t$ and
+predicts the velocity: $\lVert \hat v - (\varepsilon - r) \rVert^2$, $t \sim U(0, 1)$.
+Each training pair has a known straight path, but at a given $x_t$ many pairs
+cross, so the network learns their *average* velocity. Integrating that field
+carries the noise distribution onto $p(R \mid B_7)$. The target has variance
+$1 + \operatorname{Var}(r) \approx 1.33$, so the loss's floor is well above 0 and its
+values are not comparable with the diffusion loss.
+
+**Sampling (ODE).** Start from $x_1 = z \sim \mathcal N(0, I)$ and integrate
+$dx/dt = v_\theta(x, t, B_7)$ to $t = 0$ in `sample_steps` equal steps (default 50):
+
+| `solver` | Step | Network evaluations |
+| --- | --- | --- |
+| `euler` (default) | $x \leftarrow x + (s - t)\, v(x, t)$ | `steps` |
+| `heun` | Euler step, then the average of the velocities at both ends | 2 · `steps` − 1 (plain Euler on the last step, which ends at $t = 0$) |
+
+Like DDIM with `eta` 0, a sample is deterministic given $z$. Straight paths can
+be followed with few steps, which is the speed claim to test against diffusion
+(`evaluate --sample-steps`).
+
+```python
+from msbgen.models import FlowConfig, MSBFlow
+
+model = MSBFlow(FlowConfig(arch_args={"width": 32, "levels": 4, "blocks": 1}))
+loss = model.loss(x)                                    # x: (B, 1, H, W) uint8 originals
+est = model.sample(top, steps=20, solver="heun", generator=torch.Generator().manual_seed(0))   # Î / 255
+```
+
+**Training** (`--preset flow`): identical to `--preset diffusion` (40k steps, EMA
+0.999, `best.pt` by validation loss). `--solver` sets the default solver, used in
+validation and stored in the checkpoint. The PSNR argument of
+[why a sample scores lower PSNR](#why-a-sample-scores-lower-psnr) applies unchanged.
+
+A test runs the sampler with an *oracle* velocity $(x_t - r) / t$: with straight
+paths, both solvers must land exactly on the original image for any number of steps.
+
 ## Reconstructors (`reconstructor.py`)
 
 They wrap a checkpoint so it can be used anywhere a `Reconstructor` is expected: the
@@ -215,12 +269,17 @@ scores   # {"psnr": ..., "ssim": ..., "mae": ..., "msb_consistency": ...}
 
 diff = load_reconstructor("runs/diffusion/best.pt", steps=50, eta=0.0)   # DiffusionReconstructor
 diff.sample(top, k=1, bit_depth=8, seed=3)   # a different plausible image per seed
+fm = load_reconstructor("runs/flow/best.pt", steps=20, solver="heun")      # FlowReconstructor
 ```
 
-**`DiffusionReconstructor`** is `stochastic`. `reconstruct` returns the sample for
+Sampler options that don't apply to a checkpoint's kind are ignored (`eta` for flow
+matching, `solver` for diffusion, both for regression), so callers can pass them
+all. `sampler` holds the settings in use; `evaluate` records it in `summary.json`.
+
+**`DiffusionReconstructor`** and **`FlowReconstructor`** are `stochastic`. `reconstruct` returns the sample for
 `seed` (default 0), and `sample(..., seed)` draws any other. The noise comes from a
 CPU generator, so a seed gives the same image on CPU and GPU. `on_step` is called
-after every denoising step: `evaluate` and the web app pass their **thermal guard**
+after every network evaluation: `evaluate` and the web app pass their **thermal guard**
 check there, because sampling is sustained full GPU load. Its default `tile` is
 1024, not 512. The network's GroupNorm layers normalise over their whole input, so
 tiles would see different statistics than a full pass. 1024 keeps Kodak-sized
@@ -254,6 +313,28 @@ We need it because MSE-trained networks are expected to improve PSNR but look
 visible, and it motivates the generative models (Milestones 3–5), which should
 trade some PSNR for sharper, more realistic detail. See
 [why a sample scores lower PSNR](#why-a-sample-scores-lower-psnr).
+
+## DISTS and KID (`perceptual.py`, via `piq`)
+
+```python
+from msbgen.models.perceptual import DISTS, InceptionFeatures
+from msbgen.core import image_patches, kid
+
+dists = DISTS()                         # downloads VGG16 + DISTS weights on first use
+dists(reference, estimate, 255.0)       # lower is better, in [0, 1]
+
+features = InceptionFeatures()          # FID Inception, 2048-d pool features
+kid(features(image_patches(fakes, 128), 255.0), features(image_patches(reals, 128), 255.0))  # (mean, std)
+```
+
+LPIPS still compares features *at the same position*, so a sample with the right
+kind of texture in slightly the wrong place is penalised much like a blurry one.
+DISTS compares feature statistics as well as structure, and so it tolerates
+plausible texture that is not pixel-aligned. KID drops the pairing altogether: it
+compares the distribution of output patches with that of real patches. These two
+metrics are where a generative model is expected to beat regression. Keep the
+random fill in the table as a sanity check: its noise is "texture" too, and it
+should still lose clearly.
 
 ## Tests
 

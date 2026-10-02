@@ -94,15 +94,16 @@ class AnalysisResponse(ImageInfo):
 class ModelInfo(BaseModel):
     name: str = Field(description="Run name, used to select the model")
     label: str
-    kind: str = Field(description="'regression' (one deterministic estimate) or 'diffusion' (a sample of p(R | B7))")
-    arch: str = Field(description="'cnn', 'unet' or 'tunet' (time-conditioned U-Net, diffusion)")
+    kind: str = Field(description="'regression' (one deterministic estimate), or 'diffusion' / 'flow' "
+                                   "(flow matching): a sample of p(R | B7)")
+    arch: str = Field(description="'cnn', 'unet' or 'tunet' (time-conditioned U-Net, generative models)")
     output: str = Field(description="'direct' (predicts I) or 'residual' (predicts the missing bits)")
     k: int = Field(description="Number of transmitted MSB planes the model expects")
     bit_depth: int
     channels: int
     parameters: int
     step: int = Field(description="Training step of the checkpoint")
-    val_psnr: float | None = Field(description="Validation PSNR at that step (dB); for diffusion, of one sample")
+    val_psnr: float | None = Field(description="Validation PSNR at that step (dB); for generative models, of one sample")
     val_gain_db: float | None = Field(description="Validation PSNR gain over midpoint fill (dB)")
 
 
@@ -120,6 +121,8 @@ class MethodResult(BaseModel):
     ssim: float | None
     mae: float
     msb_consistency: float = Field(description="Fraction of pixels whose top k bits match the transmitted ones")
+    lpips: float | None = Field(None, description="LPIPS, lower is better; null if unavailable (see `perceptual`)")
+    dists: float | None = Field(None, description="DISTS, lower is better; null if unavailable (see `perceptual`)")
     psnr_gain: float | None = Field(description="PSNR minus midpoint-fill PSNR (dB)")
     image: str = Field(description="Reconstruction as an 8-bit PNG data URL")
     error_map: str = Field(description="|I - Î| × 4 as an 8-bit PNG data URL (brighter = larger error)")
@@ -129,3 +132,33 @@ class ReconstructResponse(ImageInfo):
     k: int
     original: str = Field(description="The image that was reconstructed (grayscale), as a PNG data URL")
     results: list[MethodResult] = Field(description="Fills first (zero, mid, random), then models")
+    perceptual: list[str] = Field(default_factory=list, description="Perceptual metrics computed: 'lpips', 'dists'")
+
+
+class MetricStat(BaseModel):
+    mean: float
+    std: float = Field(description="Std over images; for kid, over KID subsets")
+
+
+class EvaluationMethod(BaseModel):
+    name: str
+    label: str
+    kind: str = Field(description="'fill', 'regression' or 'generative'")
+    metrics: dict[str, MetricStat | None] = Field(
+        description="psnr, ssim, lpips, dists, mae, msb_consistency, psnr_avg, diversity, time_s, kid (null if not computed)")
+
+
+class Evaluation(BaseModel):
+    name: str = Field(description="Evaluation folder name, e.g. 'kodak-s8'")
+    data: str
+    images: int
+    k: int
+    samples: int = Field(description="Draws per image for stochastic methods")
+    kid_patch: int | None = Field(description="KID patch size in pixels; null if KID was not computed")
+    modified: float = Field(description="summary.json modification time (Unix seconds)")
+    methods: list[EvaluationMethod]
+
+
+class EvaluationsResponse(BaseModel):
+    eval_dir: str
+    evaluations: list[Evaluation] = Field(description="Newest first")

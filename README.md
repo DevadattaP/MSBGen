@@ -28,8 +28,10 @@ research questions and milestones.
 | Bit-plane explorer web app (slice & visualise planes) | ✅ done |
 | Bit-plane analysis (entropy, correlations, k-MSB reconstruction) | ✅ done |
 | Deterministic baselines (CNN / U-Net, residual prediction) | ✅ done: [results](#results-kodak) |
-| Conditional diffusion on the residual, p(R \| B7) | 🚧 code done, smoke-tested; full training run pending |
-| Flow matching / normalizing flow | ⏳ |
+| Conditional diffusion on the residual, p(R \| B7) | ✅ done: [results](#diffusion-results-kodak) |
+| Perceptual evaluation (DISTS, patch KID, plots, web UI) | ✅ done |
+| Conditional flow matching on the residual | 🚧 in progress |
+| Normalizing flow | ⏳ |
 | Multi-MSB experiments, entropy coding, final codec | ⏳ |
 
 ### Bit-plane explorer
@@ -189,8 +191,9 @@ python -m msbgen.cli.train --preset unet-res
 # 3. Training curves (loss, PSNR, SSIM, LR) → outputs/plots/
 python -m msbgen.cli.plot_runs
 
-# 4. Evaluate on Kodak (tables, per-image CSV, comparison images)
-python -m msbgen.cli.evaluate data/processed/kodak --models runs/*/best.pt --lpips
+# 4. Evaluate on Kodak (tables, per-image CSV, comparison images), then plot the results
+python -m msbgen.cli.evaluate data/processed/kodak --models runs/*/best.pt --lpips --dists --kid
+python -m msbgen.cli.plot_eval
 ```
 
 Training logs its full history to `runs/<name>/log.jsonl`: training loss and PSNR,
@@ -204,8 +207,10 @@ overheating and shutting down mid-run. See
 Trained models show up automatically in the web app, in section **4 · Model
 reconstruction**, which sits next to the zero, midpoint and random fills. It has a toggle
 between reconstructions and error maps ($|I - \hat I| \times 4$), and the
-PSNR/SSIM/MAE/consistency for the uploaded image. Colour uploads are converted to
-grayscale for the models.
+PSNR/SSIM/LPIPS/DISTS/MAE/consistency for the uploaded image. Colour uploads are converted to
+grayscale for the models. Saved `evaluate` results (including the set-level KID,
+PSNR of the sample mean and diversity) appear in the **Test-set evaluation**
+section, with a switch between evaluation folders.
 
 Each training run takes roughly 1–1.5 h on the development laptop (GeForce MX350,
 2 GB) with the default sizes. Measured speeds and memory are in
@@ -305,7 +310,7 @@ python -m msbgen.cli.train --preset diffusion
 python -m msbgen.cli.train --preset diffusion --resume runs/diffusion/last.pt
 
 # Evaluate against the baselines, 4 samples per image
-python -m msbgen.cli.evaluate data/processed/kodak --models runs/*/best.pt --lpips --samples 4
+python -m msbgen.cli.evaluate data/processed/kodak --models runs/*/best.pt --lpips --dists --kid --samples 4
 ```
 
 **What to expect.** A sample from the true posterior has *twice* the MSE of the
@@ -314,7 +319,8 @@ U-Net on PSNR (≈ 15.6 dB on Kodak), below the midpoint fill. The random fill s
 the same effect with a uniform prior (−3.19 dB). The diffusion model has to win
 elsewhere:
 
-- lower LPIPS than the regression models
+- lower LPIPS, DISTS and patch KID than the regression models (DISTS and KID
+  don't require texture to be pixel-aligned, so they are the fairer test)
 - SSIM and LPIPS far better than the random fill
 - `psnr_avg` climbing back towards the U-Net's PSNR as the number of samples grows
 - non-zero `diversity`
@@ -326,7 +332,75 @@ The derivation and details are in
 shut down once during an unguarded diffusion validation. The guard is now checked
 after every denoising step in training validation, `evaluate` and the web app.
 
-**Results:** to be filled in once the full training run finishes.
+#### Diffusion results (Kodak)
+
+Same 24 images and $k = 1$ as the baselines, with 8 samples per image for the
+stochastic methods (`outputs/eval/kodak-s8`; diffusion `best.pt` at step 40k,
+DDIM 50 steps, `eta` 0). Stochastic methods are scored on sample 0; **PSNR avg** is
+the PSNR of the mean of the 8 samples. KID is patch KID × 10³ (128 px patches,
+936 per method, every sample for stochastic ones).
+
+| Method | PSNR (dB) ↑ | SSIM ↑ | LPIPS ↓ | DISTS ↓ | KID ↓ | PSNR avg | Diversity |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Midpoint fill | 17.01 | 0.579 | 0.517 | 0.364 | 81.6 | | |
+| Random fill | 13.82 | 0.129 | 0.924 | 0.385 | 119.6 | 16.44 | 33.9 |
+| CNN (direct) | 18.04 | 0.617 | **0.449** | 0.281 | 93.6 | | |
+| U-Net (residual) | **18.60** | **0.637** | 0.455 | 0.293 | 79.6 | | |
+| Diffusion (residual) | 16.33 | 0.480 | 0.461 | **0.269** | **77.7** | 17.85 | 16.6 |
+
+What the numbers show:
+
+- **The sampler is sound.** One sample is 2.3 dB below the residual U-Net (an ideal
+  posterior sampler: 3 dB). The mean of 8 samples is only 0.75 dB below it, against
+  0.51 dB expected for 8 ideal samples, so the model's posterior mean is close to
+  the regression estimate. The samples are somewhat under-dispersed, as is usual
+  for deterministic DDIM.
+- **DISTS is where it wins.** Diffusion has the best DISTS of all methods and beats
+  the residual U-Net on 20 of 24 images (`eval_kodak-s8_paired.png`), while staying
+  far ahead of the random fill. LPIPS, which compares features at the same
+  position, is a tie (11/24).
+- **KID can't separate the methods at this size.** Diffusion is lowest, but the
+  midpoint fill beats the CNN and the plain U-Net, and every method is far from
+  real images. This summary predates the KID error-bar fix, so it has no spreads.
+- **The win is small because $B_7$ says little.** With one plane the posterior is
+  very wide; multi-plane runs ($k = 2$) are the test of whether the generative
+  advantage grows with information.
+
+Plots: `python -m msbgen.cli.plot_eval` (metrics per method, perception vs
+distortion, paired per-image comparison). The web app shows the same table in its
+**Test-set evaluation** section.
+
+### Conditional flow matching
+
+Milestone 4 learns the same distribution $p(R \mid B_7)$ with **flow matching**
+instead of diffusion. Everything else is held fixed (residual, $B_7$ conditioning,
+the 4.0 M-parameter `TimeUNet`, DIV2K crops, 40k steps, EMA 0.999), so the comparison
+isolates the generative process:
+
+| | Diffusion | Flow matching |
+| --- | --- | --- |
+| Path from data to noise | $x_t = \alpha_t r + \sigma_t \varepsilon$ (cosine schedule) | $x_t = (1 - t)\, r + t\, \varepsilon$ (straight line) |
+| Network predicts | $v = \alpha_t \varepsilon - \sigma_t r$ | velocity $\varepsilon - r$ |
+| Sampler | DDIM, 50 steps | ODE, Euler (or Heun), 50 steps by default |
+
+```shell
+# Train (same budget as the diffusion run: ≈ 5 h of compute, 9–10 h with validations and thermal pauses)
+python -m msbgen.cli.train --preset flow
+
+# Evaluate next to diffusion and the baselines, then plot
+python -m msbgen.cli.evaluate data/processed/kodak --models runs/*/best.pt --lpips --dists --kid --samples 8 --out outputs/eval/kodak-fm
+python -m msbgen.cli.plot_eval outputs/eval/kodak-fm --pair flow diffusion
+
+# Steps vs quality: the claim to test is that straight paths need fewer steps
+python -m msbgen.cli.evaluate data/processed/kodak --models runs/flow/best.pt --dists --sample-steps 10 --out outputs/eval/kodak-fm-10
+```
+
+What to compare against diffusion: DISTS / KID at equal steps, the same metrics at
+10–20 steps (where flow matching should degrade less), and `psnr_avg` / `diversity`
+(how well calibrated the samples are). Details in
+[msbgen/models/README.md](msbgen/models/README.md#conditional-flow-matching-flowpy).
+
+**Results:** pending the full training run.
 
 ## Project structure
 
@@ -342,17 +416,18 @@ MSBGen/
 │   │   ├── metrics.py     # PSNR, SSIM, MAE
 │   │   └── image_io.py    # decode uploads → grayscale/RGB uint8/uint16 arrays, PNG encoding
 │   ├── data/              # Dataset download/preparation + training crops (see data/README.md)
-│   ├── models/            # CNN / U-Net, diffusion, checkpoints, reconstructors, LPIPS (see models/README.md)
+│   ├── models/            # CNN / U-Net, diffusion, flow matching, checkpoints, reconstructors, metrics (see models/README.md)
 │   ├── training.py        # training loop: regression + diffusion, EMA, validation vs fills, checkpoints, resume
 │   ├── utils/             # gpu_guard / cpu_guard / thermal: pause training when too hot
 │   ├── cli/               # Command-line tools (see cli/README.md)
 │   │   ├── analyze.py     # dataset-level analysis → CSV / JSON / plots
 │   │   ├── prepare_data.py  # download + convert DIV2K / Kodak
-│   │   ├── train.py       # train a baseline or the diffusion model
+│   │   ├── train.py       # train a baseline or a generative model (diffusion, flow)
 │   │   ├── plot_runs.py   # training curves + history CSV
+│   │   ├── plot_eval.py   # evaluation plots: metrics, perception vs distortion, paired
 │   │   └── evaluate.py    # score fills + checkpoints on a test set
 │   ├── api/
-│   │   ├── routes.py      # /api/health, bitplanes, analysis, models, reconstruct
+│   │   ├── routes.py      # /api/health, bitplanes, analysis, models, reconstruct, evaluations
 │   │   ├── model_registry.py  # discovers runs/*/best.pt for the web app
 │   │   └── schemas.py     # Pydantic response models
 │   └── web/static/        # Front-end (plain HTML / CSS / JS, no build step)
@@ -374,7 +449,7 @@ docs:
 
 - [msbgen/core/README.md](msbgen/core/README.md): bit-planes, analysis,
   reconstructors, metrics
-- [msbgen/models/README.md](msbgen/models/README.md): networks, the diffusion model, checkpoints, LPIPS
+- [msbgen/models/README.md](msbgen/models/README.md): networks, the diffusion and flow-matching models, checkpoints, LPIPS / DISTS / KID
 - [msbgen/data/README.md](msbgen/data/README.md): datasets and preparation
 - [msbgen/cli/README.md](msbgen/cli/README.md): every command, its options and
   output formats
@@ -409,6 +484,9 @@ To make it reachable from other machines on your network:
 | `MSBGEN_MAX_PIXELS` | `16777216` (4096²) | Maximum image area |
 | `MSBGEN_MODELS_DIR` | `runs` | Where the web app looks for `<run>/best.pt` checkpoints |
 | `MSBGEN_DEVICE` | auto | Device for model inference (`cuda`, `cpu`, …) |
+| `MSBGEN_EVAL_DIR` | `outputs/eval` | Where the web app looks for saved evaluations (`<name>/summary.json`) |
+| `MSBGEN_PERCEPTUAL` | `1` | `0` turns off LPIPS / DISTS per reconstruction |
+| `MSBGEN_PERCEPTUAL_MAX_PIXELS` | `4194304` (2048²) | Larger images skip LPIPS / DISTS (GPU memory) |
 
 ### Tests
 
@@ -507,15 +585,33 @@ fields plus:
   "results": [
     { "name": "mid", "label": "Midpoint fill", "kind": "fill",
       "psnr": 17.29, "ssim": 0.635, "mae": 30.66, "msb_consistency": 1.0,
+      "lpips": 0.383, "dists": 0.265,
       "psnr_gain": 0.0, "image": "data:...", "error_map": "data:..." },
     { "name": "unet-res", "label": "U-Net (residual)", "kind": "model", "...": "..." }
-  ]
+  ],
+  "perceptual": ["lpips", "dists"]
 }
 ```
+
+`lpips` and `dists` are `null` (and missing from `perceptual`) when `lpips` / `piq`
+or their weights are unavailable, when `MSBGEN_PERCEPTUAL=0`, or for images larger
+than `MSBGEN_PERCEPTUAL_MAX_PIXELS` (with a note). The networks load on the first
+request (the first ever use downloads their weights).
 
 Fills come first (`zero`, `mid`, `random`), then models. `psnr_gain` is relative to midpoint fill, and
 `error_map` is $|I - \hat I| \times 4$. Errors: `400` for non-8-bit input or an
 invalid `k`, and `404` for an unknown model name.
+
+### `GET /api/evaluations`
+
+Saved test-set evaluations (`msbgen.cli.evaluate` output) found in
+`MSBGEN_EVAL_DIR`, newest first:
+`{"eval_dir", "evaluations": [{"name", "data", "images", "k", "samples", "kid_patch", "modified", "methods": [{"name", "label", "kind", "metrics": {"psnr": {"mean", "std"}, "...": null}}]}]}`.
+`kind` is `fill`, `regression` or `generative`; `metrics` has `psnr`, `ssim`,
+`lpips`, `dists`, `mae`, `msb_consistency`, `psnr_avg`, `diversity`, `time_s` and
+`kid` (std over images, or over KID subsets for `kid`; `null` if not computed).
+Set-level metrics such as KID exist only here, not per uploaded image. The web
+app shows these in its **Test-set evaluation** section.
 
 ### `GET /api/health`
 

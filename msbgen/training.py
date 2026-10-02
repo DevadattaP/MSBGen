@@ -2,13 +2,14 @@
 
 * regression (`ModelConfig`): CNN / U-Net baselines, MSE (or L1) to the original image;
   `best.pt` is the checkpoint with the highest validation PSNR.
-* diffusion (`DiffusionConfig`): the v-prediction loss of `MSBDiffusion`; `best.pt` is the
+* generative: diffusion (`DiffusionConfig`, the v-prediction loss of `MSBDiffusion`) or
+  flow matching (`FlowConfig`, the velocity loss of `MSBFlow`); `best.pt` is the
   checkpoint with the lowest validation loss (fixed t and noise, so it is comparable
-  between validations). Validation PSNR / SSIM are of one DDIM sample per crop, which is
+  between validations). Validation PSNR / SSIM are of one sample per crop, which is
   expected to score *below* a regression model on PSNR (see msbgen/models/README.md).
 
 With `ema` > 0 an exponential moving average of the weights is kept; validation and the
-saved inference weights use it (standard for diffusion models).
+saved inference weights use it (standard for generative models).
 
 A run lives in `<out_dir>/<name>/`:
 
@@ -56,16 +57,15 @@ from torch.utils.data import DataLoader
 
 from msbgen.core.metrics import ssim
 from msbgen.data.crops import CenterCrops, RandomCrops
-from msbgen.models.checkpoint import build_model, read_checkpoint, save_checkpoint
-from msbgen.models.diffusion import DiffusionConfig, MSBDiffusion
-from msbgen.models.msb_net import ModelConfig, MSBNet
+from msbgen.models.checkpoint import GENERATIVE_KINDS, ModelConfigs, Models, build_model, read_checkpoint, save_checkpoint
+from msbgen.models.msb_net import ModelConfig
 from msbgen.utils.thermal import ThermalGuard, ThermalLimits
 
 
 @dataclass
 class TrainConfig:
     name: str
-    model: ModelConfig | DiffusionConfig = field(default_factory=ModelConfig)
+    model: ModelConfigs = field(default_factory=ModelConfig)
     train_dirs: list[str] = field(default_factory=lambda: ["data/processed/div2k-train"])
     val_dirs: list[str] = field(default_factory=lambda: ["data/processed/div2k-valid"])
     out_dir: str = "runs"
@@ -81,8 +81,8 @@ class TrainConfig:
     val_crop: int = 256
     val_limit: int | None = None
     log_every: int = 100
-    ema: float = 0.0  # EMA decay of the weights (0 = off); e.g. 0.999 for diffusion
-    val_sample_steps: int = 25  # diffusion: DDIM steps for the validation samples
+    ema: float = 0.0  # EMA decay of the weights (0 = off); e.g. 0.999 for the generative models
+    val_sample_steps: int = 25  # generative models: sampling steps for the validation samples
     workers: int = 4
     seed: int = 0
     device: str = "auto"
@@ -124,16 +124,16 @@ def _psnr_per_image(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 
 
 @torch.no_grad()
-def validate(model: MSBNet | MSBDiffusion, loader: DataLoader, device: torch.device, loss_fn=F.mse_loss,
+def validate(model: Models, loader: DataLoader, device: torch.device, loss_fn=F.mse_loss,
              sample_steps: int = 25, on_step: Callable[[], object] | None = None) -> dict[str, float]:
     """Validation loss, and mean per-image PSNR / SSIM of the model and of the midpoint-fill
     and random-fill baselines on the same crops, plus MSB consistency.
 
-    For diffusion, the loss uses fixed t and noise and the estimate is one DDIM sample
-    (`sample_steps` steps) from fixed noise. The random fill uses a fixed seed too, so
+    For the generative models, the loss uses fixed t and noise and the estimate is one
+    sample (`sample_steps` steps, the model's default sampler) from fixed noise. The random fill uses a fixed seed too, so
     every validation of every run sees the same noise.
 
-    `on_step` is called after every batch and every denoising step: diffusion validation
+    `on_step` is called after every batch and every sampling step: generative validation
     is minutes of sustained load, so training passes its thermal-guard check here."""
     cfg = model.config
     n, k = cfg.bit_depth, cfg.k
@@ -141,7 +141,7 @@ def validate(model: MSBNet | MSBDiffusion, loader: DataLoader, device: torch.dev
     was_training = model.training
     model.eval()
     gen = torch.Generator(device=device).manual_seed(0)  # random fill
-    model_gen = torch.Generator(device=device).manual_seed(1)  # diffusion loss / samples
+    model_gen = torch.Generator(device=device).manual_seed(1)  # generative loss / samples
     losses, consistent = [], []
     psnrs: dict[str, list] = {"model": [], "mid": [], "random": []}
     ssims: dict[str, list] = {"model": [], "mid": [], "random": []}
@@ -151,7 +151,7 @@ def validate(model: MSBNet | MSBDiffusion, loader: DataLoader, device: torch.dev
         top = keep_top_bits_t(x, k, n)
         if on_step is not None:
             on_step()
-        if model.kind == "diffusion":
+        if model.kind in GENERATIVE_KINDS:
             losses.append(model.loss(x, generator=model_gen, reduction="none"))
             pred = model.sample(top, steps=sample_steps, generator=model_gen, on_step=on_step)
         else:
@@ -193,10 +193,17 @@ def _log(run_dir: Path, record: dict) -> None:
 
 
 def _truncate_log(run_dir: Path, step: int) -> None:
-    """Drop history after `step` (e.g. logged after the checkpoint we resume from)."""
+    """Drop history after `step` (e.g. logged after the checkpoint we resume from), and any torn records
+    (a hard power-off can leave the tail of the file as NUL bytes or a half-written line)."""
     path = run_dir / "log.jsonl"
     if path.exists():
-        kept = [line for line in path.read_text().splitlines() if line and json.loads(line)["step"] <= step]
+        kept = []
+        for line in path.read_text(errors="replace").splitlines():
+            try:
+                if json.loads(line)["step"] <= step:
+                    kept.append(line)
+            except (ValueError, KeyError, TypeError):
+                continue
         path.write_text("".join(line + "\n" for line in kept))
 
 
@@ -217,9 +224,9 @@ def train(cfg: TrainConfig, resume: Path | None = None) -> Path:
     eval_model = ema if ema is not None else model  # validated, and saved as the inference weights
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, _lr_lambda(cfg))
-    diffusion = model.kind == "diffusion"
-    # best.pt criterion: highest validation PSNR (regression) or lowest validation loss (diffusion)
-    best_key, sign = ("val_loss", -1.0) if diffusion else ("val_psnr", 1.0)
+    generative = model.kind in GENERATIVE_KINDS
+    # best.pt criterion: highest validation PSNR (regression) or lowest validation loss (generative)
+    best_key, sign = ("val_loss", -1.0) if generative else ("val_psnr", 1.0)
     start, best = 0, -math.inf  # best is stored as sign * metric, so larger is always better
     if resume:
         ckpt = read_checkpoint(resume, map_location=device)
@@ -275,7 +282,7 @@ def train(cfg: TrainConfig, resume: Path | None = None) -> Path:
         best = max(best, score)
         metrics.update(best_metrics())
         ssim_text = f", SSIM {metrics['val_ssim']:.4f}" if metrics["val_ssim"] is not None else ""
-        print(f"  val PSNR {metrics['val_psnr']:.2f} dB{' (sample)' if diffusion else ''} "
+        print(f"  val PSNR {metrics['val_psnr']:.2f} dB{' (sample)' if generative else ''} "
               f"(midpoint {metrics['val_psnr_mid']:.2f}, gain {metrics['val_gain_db']:+.2f} dB{ssim_text}, "
               f"loss {metrics['val_loss']:.5f}, MSB consistency {metrics['val_msb_consistency']:.4f})"
               f"{'  ★ best' if improved and step else ''}", file=sys.stderr)
@@ -291,7 +298,7 @@ def train(cfg: TrainConfig, resume: Path | None = None) -> Path:
     try:
         for batch in loader:
             x = batch.to(device, non_blocking=True)
-            if diffusion:
+            if generative:
                 loss = model.loss(x)
             else:
                 loss = loss_fn(model(keep_top_bits_t(x, k, n)), x.float() / model.max_value)
@@ -311,7 +318,7 @@ def train(cfg: TrainConfig, resume: Path | None = None) -> Path:
                 elapsed = max(time.time() - t0 - window_paused, 1e-6)  # compute time only
                 mean_loss = running / cfg.log_every
                 rec = {"step": step, "epoch": epoch(), "loss": mean_loss,
-                       "train_psnr": -10 * math.log10(max(mean_loss, 1e-10)) if cfg.loss == "mse" and not diffusion else None,
+                       "train_psnr": -10 * math.log10(max(mean_loss, 1e-10)) if cfg.loss == "mse" and not generative else None,
                        "lr": scheduler.get_last_lr()[0], "it_per_s": cfg.log_every / elapsed, **guard.status()}
                 eta = (cfg.steps - step) / rec["it_per_s"] / 60
                 temps = "".join(f"  {name} {rec[key]:.0f}°C" for name, key in (("GPU", "gpu_temp"), ("CPU", "cpu_temp"))

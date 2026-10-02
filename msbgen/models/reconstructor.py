@@ -1,6 +1,7 @@
 """Trained checkpoints as `Reconstructor`s, with tiled inference for large images.
 
-    load_reconstructor(path)   → ModelReconstructor (regression) or DiffusionReconstructor
+    load_reconstructor(path)   → ModelReconstructor (regression), DiffusionReconstructor
+                                 or FlowReconstructor
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ import numpy as np
 import torch
 
 from msbgen.core.reconstruction import Reconstructor
-from msbgen.models.checkpoint import load_model, read_checkpoint
+from msbgen.models.checkpoint import GENERATIVE_KINDS, load_model, read_checkpoint
 
 
 def default_device() -> torch.device:
@@ -92,13 +93,13 @@ class ModelReconstructor(_CheckpointReconstructor):
         return _to_estimate(out, self.model.max_value, top)
 
 
-class DiffusionReconstructor(_CheckpointReconstructor):
-    """Samples a diffusion checkpoint: Î = top + R̂, R̂ ~ p(R | top).
+class _SamplingReconstructor(_CheckpointReconstructor):
+    """Samples a generative checkpoint: Î = top + R̂, R̂ ~ p(R | top).
 
     `reconstruct` draws with `seed`; `sample(..., seed)` draws with any seed. The noise
     comes from a CPU generator, so a given seed gives the same image on CPU and GPU.
 
-    Images larger than `tile` are tiled at every denoising step (the network is applied
+    Images larger than `tile` are tiled at every sampling step (the network is applied
     per tile, the sampler state covers the whole image). The network's GroupNorm layers
     normalise over their whole input, so tiles see slightly different statistics than a
     full pass; the default tile (1024) keeps Kodak-sized images in one piece.
@@ -106,16 +107,20 @@ class DiffusionReconstructor(_CheckpointReconstructor):
 
     stochastic = True
 
-    def __init__(self, checkpoint: Path, device: str | torch.device | None = None,
-                 name: str | None = None, tile: int = 1024, margin: int = 64,
-                 steps: int | None = None, eta: float | None = None, seed: int = 0,
-                 on_step: Callable[[], object] | None = None):
+    def __init__(self, checkpoint: Path, device: str | torch.device | None, name: str | None, tile: int,
+                 margin: int, steps: int | None, seed: int, on_step: Callable[[], object] | None):
         super().__init__(checkpoint, device, name, tile, margin)
-        self.on_step = on_step  # called after every denoising step, e.g. a thermal-guard check
+        self.on_step = on_step  # called after every network evaluation, e.g. a thermal-guard check
         self.steps = steps or self.config.sample_steps
-        self.eta = self.config.eta if eta is None else eta
         self.seed = seed
-        self.label = "Diffusion (residual)"
+
+    @property
+    def sampler(self) -> dict:
+        """The sampler settings, as recorded by `evaluate`."""
+        return {"sample_steps": self.steps}
+
+    def _sampler_kwargs(self) -> dict:
+        return {}
 
     def reconstruct(self, top: np.ndarray, k: int, bit_depth: int) -> np.ndarray:
         return self.sample(top, k, bit_depth, self.seed)
@@ -131,18 +136,66 @@ class DiffusionReconstructor(_CheckpointReconstructor):
                              torch.cat([x_t, cond], dim=1), self.tile, self.margin)
 
         gen = torch.Generator().manual_seed(seed)
-        out = self.model.sample(x, steps=self.steps, eta=self.eta, generator=gen, predict=predict,
-                                on_step=self.on_step)
+        out = self.model.sample(x, steps=self.steps, generator=gen, predict=predict, on_step=self.on_step,
+                                **self._sampler_kwargs())
         return _to_estimate(out, self.model.max_value, top)
 
 
+class DiffusionReconstructor(_SamplingReconstructor):
+    """A diffusion checkpoint, sampled with DDIM (`steps`, `eta`)."""
+
+    def __init__(self, checkpoint: Path, device: str | torch.device | None = None,
+                 name: str | None = None, tile: int = 1024, margin: int = 64,
+                 steps: int | None = None, eta: float | None = None, seed: int = 0,
+                 on_step: Callable[[], object] | None = None):
+        super().__init__(checkpoint, device, name, tile, margin, steps, seed, on_step)
+        self.eta = self.config.eta if eta is None else eta
+        self.label = "Diffusion (residual)"
+
+    @property
+    def sampler(self) -> dict:
+        return {"sample_steps": self.steps, "eta": self.eta}
+
+    def _sampler_kwargs(self) -> dict:
+        return {"eta": self.eta}
+
+
+class FlowReconstructor(_SamplingReconstructor):
+    """A flow-matching checkpoint, sampled by integrating its ODE (`steps`, `solver`)."""
+
+    def __init__(self, checkpoint: Path, device: str | torch.device | None = None,
+                 name: str | None = None, tile: int = 1024, margin: int = 64,
+                 steps: int | None = None, solver: str | None = None, seed: int = 0,
+                 on_step: Callable[[], object] | None = None):
+        super().__init__(checkpoint, device, name, tile, margin, steps, seed, on_step)
+        self.solver = solver or self.config.solver
+        self.label = "Flow matching (residual)"
+
+    @property
+    def sampler(self) -> dict:
+        return {"sample_steps": self.steps, "solver": self.solver}
+
+    def _sampler_kwargs(self) -> dict:
+        return {"solver": self.solver}
+
+
+SAMPLER_OPTIONS = {"diffusion": ("steps", "eta"), "flow": ("steps", "solver")}
+
+
 def load_reconstructor(checkpoint: Path, device: str | torch.device | None = None, **kwargs) -> _CheckpointReconstructor:
-    """The right `Reconstructor` for a checkpoint. Diffusion accepts `steps`, `eta`, `seed`, `on_step`."""
+    """The right `Reconstructor` for a checkpoint.
+
+    Generative models accept `steps`, `seed`, `on_step`, plus `eta` (diffusion) or
+    `solver` (flow matching); options that don't apply to the checkpoint's kind are ignored.
+    """
     kind = read_checkpoint(checkpoint)["model_kind"]
+    sampler_keys = {"steps", "eta", "solver", "seed", "on_step"}
+    keep = set(SAMPLER_OPTIONS.get(kind, ())) | ({"seed", "on_step"} if kind in GENERATIVE_KINDS else set())
+    kwargs = {key: v for key, v in kwargs.items() if key not in sampler_keys or key in keep}
     if kind == "diffusion":
         return DiffusionReconstructor(checkpoint, device, **kwargs)
-    for key in ("steps", "eta", "seed", "on_step"):
-        kwargs.pop(key, None)
+    if kind == "flow":
+        return FlowReconstructor(checkpoint, device, **kwargs)
     return ModelReconstructor(checkpoint, device, **kwargs)
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import math
 
 import numpy as np
@@ -17,8 +18,12 @@ from msbgen.api.schemas import (
     Channel,
     CombinedPlane,
     Correlation,
+    Evaluation,
+    EvaluationMethod,
+    EvaluationsResponse,
     FillScores,
     ImageInfo,
+    MetricStat,
     MethodResult,
     ModelInfo,
     ModelsResponse,
@@ -42,11 +47,13 @@ from msbgen.core import (
     reconstruct_and_evaluate,
     round_estimate,
     slice_bitplanes,
+    summary_method_kind,
     to_grayscale,
     to_preview,
 )
 
 ERROR_MAP_GAIN = 4  # |I - Î| is multiplied by this so small errors are visible
+EVAL_METRICS = ("psnr", "ssim", "lpips", "dists", "mae", "msb_consistency", "psnr_avg", "diversity", "time_s", "kid")
 
 router = APIRouter(prefix="/api", tags=["api"])
 
@@ -241,6 +248,11 @@ def _build_reconstruction(loaded: LoadedImage, filename: str | None, k: int, nam
         if unknown:
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"No compatible model named {', '.join(sorted(unknown))}.")
         available = [m for m in available if m.name in names]
+    perceptual = {}
+    if image.size <= settings.perceptual_max_pixels:
+        perceptual = model_registry.perceptual_metrics()
+    elif settings.perceptual:
+        info["notes"] = [*info["notes"], "LPIPS and DISTS skipped: the image is too large for the perceptual metrics."]
 
     results: list[MethodResult] = []
     methods = [(r, "fill") for r in FILL_RECONSTRUCTORS.values()] + [(m, "model") for m in available]
@@ -251,10 +263,12 @@ def _build_reconstruction(loaded: LoadedImage, filename: str | None, k: int, nam
         else:
             estimate, scores = reconstruct_and_evaluate(method, image, k, n)
         error = np.clip(np.abs(image.astype(np.float64) - estimate) * ERROR_MAP_GAIN, 0, 255).astype(np.uint8)
+        with model_registry.inference_lock():
+            extra = {name: _finite(fn(image, estimate, 255.0)) for name, fn in perceptual.items()}
         results.append(MethodResult(
             name=method.name, label=method.label, kind=kind,
             psnr=_finite(scores["psnr"]), ssim=_finite(scores["ssim"]), mae=scores["mae"],
-            msb_consistency=scores["msb_consistency"],
+            msb_consistency=scores["msb_consistency"], **extra,
             psnr_gain=None,
             image=_data_url(encode_png(round_estimate(estimate, n))),
             error_map=_data_url(encode_png(error)),
@@ -263,7 +277,8 @@ def _build_reconstruction(loaded: LoadedImage, filename: str | None, k: int, nam
     for r in results:
         r.psnr_gain = r.psnr - mid if r.psnr is not None and mid is not None else None
     info["color_mode"], info["channels"] = "L", [Channel(name="L", label="Gray").model_dump()]
-    return ReconstructResponse(**info, k=k, original=_data_url(encode_png(image)), results=results)
+    return ReconstructResponse(**info, k=k, original=_data_url(encode_png(image)), results=results,
+                               perceptual=list(perceptual))
 
 
 @router.post("/reconstruct", response_model=ReconstructResponse)
@@ -273,3 +288,37 @@ async def reconstruct(file: UploadFile, k: int = Form(1), models: str | None = F
     loaded = await _load_upload(file)
     names = [m.strip() for m in models.split(",") if m.strip()] if models else None
     return await run_in_threadpool(_build_reconstruction, loaded, file.filename, k, names)
+
+
+def _metric_stat(value) -> MetricStat | None:
+    if not isinstance(value, dict) or value.get("mean") is None or not math.isfinite(value["mean"]):
+        return None
+    std = value.get("std")
+    return MetricStat(mean=value["mean"], std=std if std is not None and math.isfinite(std) else 0.0)
+
+
+def _read_evaluation(path) -> Evaluation | None:
+    try:
+        summary = json.loads(path.read_text())
+        meta = summary["meta"]
+        methods = [
+            EvaluationMethod(name=name, label=e.get("label", name), kind=summary_method_kind(name, e),
+                             metrics={m: _metric_stat(e.get(m)) for m in EVAL_METRICS})
+            for name, e in summary["methods"].items()
+        ]
+        return Evaluation(name=path.parent.name, data=str(meta.get("data", "")), images=meta["images"], k=meta["k"],
+                          samples=meta.get("samples", 1), kid_patch=meta.get("kid_patch"),
+                          modified=path.stat().st_mtime, methods=methods)
+    except (OSError, ValueError, KeyError, TypeError):  # a half-written or foreign file must not break the app
+        return None
+
+
+@router.get("/evaluations", response_model=EvaluationsResponse)
+async def evaluations() -> EvaluationsResponse:
+    """Saved test-set evaluations (`msbgen.cli.evaluate` output) in MSBGEN_EVAL_DIR (default `outputs/eval/`),
+    newest first. This is where set-level metrics such as KID live."""
+    def read() -> list[Evaluation]:
+        found = [_read_evaluation(p) for p in settings.eval_dir.glob("*/summary.json")]
+        return sorted((e for e in found if e), key=lambda e: e.modified, reverse=True)
+
+    return EvaluationsResponse(eval_dir=str(settings.eval_dir), evaluations=await run_in_threadpool(read))

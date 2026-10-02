@@ -297,6 +297,8 @@ h2 { font-size: 1.05rem; }
 .data-table .group-start { border-left: 1px solid var(--border); }
 .data-table .ch-name { display: inline-flex; align-items: center; gap: 0.35rem; }
 .data-table .channel-dot { width: 8px; height: 8px; }
+.data-table td.best-cell { font-weight: 700; color: var(--text); }
+.data-table .pm { color: var(--muted); font-weight: 400; }
 
 .heatmap { min-width: 0; max-width: 560px; }
 .heatmap svg { display: block; width: 100%; height: auto; touch-action: manipulation; }

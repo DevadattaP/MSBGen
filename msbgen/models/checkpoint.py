@@ -3,7 +3,7 @@
 A checkpoint is a plain dict saved with `torch.save`, loadable with
 `torch.load(..., weights_only=True)` (no pickled classes):
 
-    {"format": "msbgen-checkpoint-v1", "model_kind": "regression" | "diffusion",
+    {"format": "msbgen-checkpoint-v1", "model_kind": "regression" | "diffusion" | "flow",
      "model_config": {...}, "state_dict": {...}, "step": int, "metrics": {...},
      "train_config": {...}, "optimizer": {...}, "scheduler": {...},   (optional, for --resume)
      "train_state_dict": {...}}                                        (optional, see below)
@@ -22,18 +22,23 @@ import torch
 from torch import nn
 
 from msbgen.models.diffusion import DiffusionConfig, MSBDiffusion
+from msbgen.models.flow import FlowConfig, MSBFlow
 from msbgen.models.msb_net import ModelConfig, MSBNet
 
 FORMAT = "msbgen-checkpoint-v1"
-KINDS = {"regression": (ModelConfig, MSBNet), "diffusion": (DiffusionConfig, MSBDiffusion)}
+KINDS = {"regression": (ModelConfig, MSBNet), "diffusion": (DiffusionConfig, MSBDiffusion),
+         "flow": (FlowConfig, MSBFlow)}
+GENERATIVE_KINDS = ("diffusion", "flow")  # sample p(R | B7); trained with EMA, best.pt by validation loss
+ModelConfigs = ModelConfig | DiffusionConfig | FlowConfig
+Models = MSBNet | MSBDiffusion | MSBFlow
 
 
-def build_model(config: ModelConfig | DiffusionConfig) -> MSBNet | MSBDiffusion:
+def build_model(config: ModelConfigs) -> Models:
     """The (untrained) model for a config; the config's `kind` picks the class."""
     return KINDS[config.kind][1](config)
 
 
-def config_from_dict(kind: str, d: dict) -> ModelConfig | DiffusionConfig:
+def config_from_dict(kind: str, d: dict) -> ModelConfigs:
     if kind not in KINDS:
         raise ValueError(f"unknown model kind {kind!r}")
     return KINDS[kind][0](**d)
@@ -72,7 +77,7 @@ def read_checkpoint(path: Path, map_location="cpu") -> dict:
     return payload
 
 
-def load_model(path: Path, device: str | torch.device = "cpu") -> tuple[MSBNet | MSBDiffusion, dict]:
+def load_model(path: Path, device: str | torch.device = "cpu") -> tuple[Models, dict]:
     """Build the model from its stored config and load the weights. Returns (model, checkpoint)."""
     payload = read_checkpoint(path)
     model = build_model(config_from_dict(payload["model_kind"], payload["model_config"]))

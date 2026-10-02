@@ -26,7 +26,7 @@ from msbgen.core.image_io import (
     to_grayscale,
     to_preview,
 )
-from msbgen.core.metrics import mae, mse, psnr, ssim
+from msbgen.core.metrics import image_patches, kid, mae, mse, psnr, ssim
 from msbgen.core.reconstruction import (
     FILL_RECONSTRUCTORS,
     MidpointFill,
@@ -38,6 +38,7 @@ from msbgen.core.reconstruction import (
     msb_consistency,
     reconstruct_and_evaluate,
     round_estimate,
+    summary_method_kind,
 )
 
 __all__ = [
@@ -51,6 +52,7 @@ __all__ = [
     "msb_consistency",
     "reconstruct_and_evaluate",
     "round_estimate",
+    "summary_method_kind",
     "ImageAnalysis",
     "ImageDecodeError",
     "LoadedImage",
@@ -62,7 +64,9 @@ __all__ = [
     "context_entropy",
     "encode_png",
     "encode_rgb_bits_png",
+    "image_patches",
     "infer_bit_depth",
+    "kid",
     "load_image",
     "mae",
     "msb_reconstruction",

@@ -4,6 +4,7 @@ const API_BITPLANES = "/api/bitplanes";
 const API_ANALYSIS = "/api/analysis";
 const API_MODELS = "/api/models";
 const API_RECONSTRUCT = "/api/reconstruct";
+const API_EVALUATIONS = "/api/evaluations";
 const CHANNEL_COLORS = { R: "var(--ch-r)", G: "var(--ch-g)", B: "var(--ch-b)", L: "var(--ch-gray)" };
 const FILL_SERIES = [
   { fill: "mid", name: "Midpoint fill", color: "var(--series-mid)", dashed: false },
@@ -52,6 +53,10 @@ const el = {
   modelsView: $("#models-view"),
   modelsGrid: $("#models-grid"),
   modelsTable: $("#models-table"),
+  evals: $("#evals"),
+  evalsSummary: $("#evals-summary"),
+  evalsPick: $("#evals-pick"),
+  evalsTable: $("#evals-table"),
   lightbox: $("#lightbox"),
   lbTitle: $("#lightbox-title"),
   lbImg: $("#lightbox-img"),
@@ -289,6 +294,7 @@ function renderModels(data) {
   const n = 8;
   const bits = data.k === 1 ? `B${n - 1}` : `B${n - 1}…B${n - data.k}`;
   const models = data.results.filter((r) => r.kind === "model");
+  const perceptual = (data.perceptual ?? []).filter((m) => m in PERCEPTUAL_TITLES);
   const scored = data.results.filter((r) => r.psnr != null);
   const best = scored.reduce((a, b) => (b.psnr > a.psnr ? b : a), scored[0]);
   const top = models.reduce((a, b) => (b.psnr > (a?.psnr ?? -Infinity) ? b : a), null);
@@ -311,7 +317,8 @@ function renderModels(data) {
       stats,
       title: isOriginal ? "Original (grayscale)" : `${r.label} — from ${bits} only`,
       caption: isOriginal ? "The image every method is compared against." :
-        `${stats} · MAE ${r.mae.toFixed(2)} · MSB consistency ${pct(r.msb_consistency)}.`,
+        `${stats} · MAE ${r.mae.toFixed(2)}${perceptual.map((m) => ` · ${PERCEPTUAL_TITLES[m]} ${fmt(r[m], 3)}`).join("")}` +
+        ` · MSB consistency ${pct(r.msb_consistency)}.`,
       download: `${stem}_${r.name}.png`,
     };
     const node = renderTile(tile, ratio);
@@ -325,10 +332,86 @@ function renderModels(data) {
     const gain = r.kind === "model" || r.name !== "mid" ? gainText(r.psnr_gain, true) : "—";
     return `<tr><td>${escapeHtml(r.label)}${r.kind === "model" ? ` <span class="hint">${escapeHtml(r.name)}</span>` : ""}</td>` +
       `<td>${r.kind === "model" ? "model" : "baseline"}</td><td>${fmt(r.psnr, 2)}</td><td>${gain}</td>` +
-      `<td>${fmt(r.ssim, 4)}</td><td>${r.mae.toFixed(2)}</td><td>${pct(r.msb_consistency)}</td></tr>`;
+      `<td>${fmt(r.ssim, 4)}</td>${perceptual.map((m) => `<td>${fmt(r[m], 4)}</td>`).join("")}` +
+      `<td>${r.mae.toFixed(2)}</td><td>${pct(r.msb_consistency)}</td></tr>`;
   });
   el.modelsTable.innerHTML = `<thead><tr><th>Method</th><th>Kind</th><th>PSNR (dB)</th><th>Δ vs midpoint</th>` +
-    `<th>SSIM</th><th>MAE</th><th>MSB consistency</th></tr></thead><tbody>${rows.join("")}</tbody>`;
+    `<th>SSIM</th>${perceptual.map((m) => `<th>${PERCEPTUAL_TITLES[m]} ↓</th>`).join("")}` +
+    `<th>MAE</th><th>MSB consistency</th></tr></thead><tbody>${rows.join("")}</tbody>`;
+}
+
+const PERCEPTUAL_TITLES = { lpips: "LPIPS", dists: "DISTS" };
+
+// ---------- Saved test-set evaluations ----------
+// key → column title, decimals, higher is better (null: no "best"), scale
+const EVAL_COLUMNS = [
+  { key: "psnr", title: "PSNR (dB) ↑", digits: 2, higher: true },
+  { key: "ssim", title: "SSIM ↑", digits: 4, higher: true },
+  { key: "lpips", title: "LPIPS ↓", digits: 4, higher: false },
+  { key: "dists", title: "DISTS ↓", digits: 4, higher: false },
+  { key: "kid", title: "KID ×10³ ↓", digits: 1, higher: false, scale: 1e3, spread: true },
+  { key: "mae", title: "MAE ↓", digits: 2, higher: false },
+  { key: "psnr_avg", title: "PSNR avg (dB)", digits: 2, higher: null },
+  { key: "diversity", title: "Diversity", digits: 2, higher: null },
+  { key: "msb_consistency", title: "MSB consistency", digits: 4, higher: null, format: pct },
+  { key: "time_s", title: "Time (s)", digits: 3, higher: null },
+];
+const KIND_TEXT = { fill: "baseline", regression: "regression", generative: "generative" };
+let evaluations = [];
+
+async function loadEvaluations() {
+  try {
+    const res = await fetch(API_EVALUATIONS);
+    if (!res.ok) return;
+    evaluations = (await res.json()).evaluations;
+  } catch { return; }
+  if (!evaluations.length) return;
+  el.evals.hidden = false;
+  el.evalsPick.hidden = evaluations.length < 2;
+  el.evalsPick.replaceChildren(...evaluations.map((ev, i) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = ev.name;
+    btn.dataset.index = String(i);
+    btn.setAttribute("aria-pressed", String(i === 0));
+    return btn;
+  }));
+  el.evalsPick.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-index]");
+    if (!btn) return;
+    for (const b of el.evalsPick.querySelectorAll("button")) b.setAttribute("aria-pressed", String(b === btn));
+    renderEvaluation(evaluations[Number(btn.dataset.index)]);
+  });
+  renderEvaluation(evaluations[0]);
+}
+
+function renderEvaluation(ev) {
+  const columns = EVAL_COLUMNS.filter((c) => ev.methods.some((m) => m.metrics[c.key]));
+  const when = new Date(ev.modified * 1000).toLocaleString();
+  el.evalsSummary.textContent = `${ev.name}: ${ev.images} images from ${ev.data}, k = ${ev.k}` +
+    `${ev.samples > 1 ? `, ${ev.samples} samples per stochastic method` : ""}` +
+    `${ev.kid_patch ? `, KID on ${ev.kid_patch} px patches` : ""} · ${when}`;
+  const best = {};
+  for (const c of columns) {
+    if (c.higher == null) continue;
+    const values = ev.methods.map((m) => m.metrics[c.key]?.mean).filter((v) => v != null);
+    if (values.length > 1) best[c.key] = c.higher ? Math.max(...values) : Math.min(...values);
+  }
+  const cell = (m, c) => {
+    const s = m.metrics[c.key];
+    if (!s) return "<td>—</td>";
+    const v = s.mean * (c.scale ?? 1);
+    const text = c.format ? c.format(s.mean) : v.toFixed(c.digits);
+    // Summaries from before the KID fix have a spread of (numerically) 0 for deterministic methods: hide it.
+    const pm = (s.std * (c.scale ?? 1)).toFixed(c.digits);
+    const spread = c.spread && Number(pm) > 0 ? ` <span class="pm">± ${pm}</span>` : "";
+    return `<td${s.mean === best[c.key] ? ' class="best-cell"' : ""}>${text}${spread}</td>`;
+  };
+  const rows = ev.methods.map((m) =>
+    `<tr><td>${escapeHtml(m.label)}${m.kind === "fill" ? "" : ` <span class="hint">${escapeHtml(m.name)}</span>`}</td>` +
+    `<td>${KIND_TEXT[m.kind] ?? escapeHtml(m.kind)}</td>${columns.map((c) => cell(m, c)).join("")}</tr>`);
+  el.evalsTable.innerHTML = `<thead><tr><th>Method</th><th>Kind</th>` +
+    `${columns.map((c) => `<th>${c.title}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody>`;
 }
 
 function gainText(g, html = false) {
@@ -842,5 +925,6 @@ initDropzone();
 initLightbox();
 initRecMetric();
 initModelsView();
+loadEvaluations();
 el.sliceBtn.addEventListener("click", slice);
 el.clearBtn.addEventListener("click", clearAll);

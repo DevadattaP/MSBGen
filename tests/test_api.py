@@ -221,15 +221,64 @@ def test_analysis_rejects_invalid_image():
     assert _analyse(b"nope").status_code == 400
 
 
-def _use_models_dir(monkeypatch, path):
+def _use_models_dir(monkeypatch, path, **overrides):
     import dataclasses
 
     from msbgen.api import model_registry, routes
     from msbgen.config import settings
 
-    patched = dataclasses.replace(settings, models_dir=path, device="cpu")
+    # No LPIPS / DISTS unless a test asks: the real ones download network weights.
+    overrides = {"perceptual": False, "eval_dir": path / "eval", **overrides}
+    patched = dataclasses.replace(settings, models_dir=path, device="cpu", **overrides)
     monkeypatch.setattr(model_registry, "settings", patched)
     monkeypatch.setattr(routes, "settings", patched)
+
+
+def test_reconstruct_perceptual_metrics(tmp_path, monkeypatch):
+    from msbgen.api import model_registry
+
+    _use_models_dir(monkeypatch, tmp_path, perceptual=True, perceptual_max_pixels=16 * 16)
+    fake = {"lpips": lambda ref, est, rng: float(np.abs(ref - est).mean() / rng), "dists": lambda *_: 0.25}
+    monkeypatch.setattr(model_registry, "perceptual_metrics", lambda: fake)
+    body = _post_reconstruct(_encode(Image.new("L", (16, 16), 100)))
+    assert body["perceptual"] == ["lpips", "dists"]
+    mid = next(r for r in body["results"] if r["name"] == "mid")
+    assert mid["dists"] == 0.25 and 0 < mid["lpips"] < 1
+    body = _post_reconstruct(_encode(Image.new("L", (17, 16), 100)))  # over perceptual_max_pixels
+    assert body["perceptual"] == [] and body["results"][0]["lpips"] is None
+    assert any("LPIPS and DISTS skipped" in n for n in body["notes"])
+
+
+def test_evaluations(tmp_path, monkeypatch):
+    import json
+    import os
+
+    _use_models_dir(monkeypatch, tmp_path)
+    assert client.get("/api/evaluations").json()["evaluations"] == []
+    stat = {"mean": 18.5, "std": 1.2}
+    for name, kid_patch, mtime in (("old", None, 1_000), ("new", 128, 2_000)):
+        folder = tmp_path / "eval" / name
+        folder.mkdir(parents=True)
+        meta = {"data": "data/kodak", "images": 24, "k": 1, "bit_depth": 8, "samples": 8}
+        if kid_patch:
+            meta["kid_patch"] = kid_patch
+        methods = {
+            "mid": {"label": "Midpoint fill", "psnr": stat, "lpips": None},
+            "diff": {"label": "Diffusion", "psnr": stat, "kid": {"mean": 0.07, "std": 0.002, "patches": 7488},
+                     "checkpoint": "runs/diff/best.pt", "config": {"k": 1}, "sample_steps": 50},
+            "unet": {"label": "U-Net", "psnr": stat, "checkpoint": "runs/unet/best.pt", "config": {"k": 1}},
+        }
+        (folder / "summary.json").write_text(json.dumps({"meta": meta, "methods": methods}))
+        os.utime(folder / "summary.json", (mtime, mtime))
+    (tmp_path / "eval" / "broken").mkdir()
+    (tmp_path / "eval" / "broken" / "summary.json").write_text("{not json")
+
+    evals = client.get("/api/evaluations").json()["evaluations"]
+    assert [(e["name"], e["kid_patch"]) for e in evals] == [("new", 128), ("old", None)]  # newest first, broken skipped
+    methods = {m["name"]: m for m in evals[0]["methods"]}
+    assert [methods[n]["kind"] for n in ("mid", "diff", "unet")] == ["fill", "generative", "regression"]
+    assert methods["diff"]["metrics"]["kid"] == {"mean": 0.07, "std": 0.002}
+    assert methods["mid"]["metrics"]["psnr"] == stat and methods["mid"]["metrics"]["lpips"] is None
 
 
 def test_models_and_reconstruct(tmp_path, monkeypatch):

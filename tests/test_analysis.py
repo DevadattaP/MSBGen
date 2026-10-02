@@ -4,6 +4,8 @@ import pytest
 from msbgen.core import (
     analyze_image,
     context_entropy,
+    image_patches,
+    kid,
     msb_reconstruction,
     plane_correlation,
     psnr,
@@ -47,6 +49,26 @@ def test_ssim_matches_skimage(rng):
 
 def test_ssim_none_for_tiny_image():
     assert ssim(np.zeros((5, 5)), np.zeros((5, 5)), 255) is None
+
+
+def test_image_patches_grid_and_shifted_grid():
+    img = np.arange(512 * 768, dtype=np.int64).reshape(512, 768)
+    patches = image_patches(img, 128)
+    assert patches.shape == (6 * 4 + 5 * 3, 128, 128)  # 39 for a Kodak-sized image
+    np.testing.assert_array_equal(patches[0], img[:128, :128])
+    np.testing.assert_array_equal(patches[24], img[64:192, 64:192])  # first of the shifted grid
+    assert image_patches(np.zeros((10, 20, 3)), 16).shape == (0, 16, 16, 3)
+
+
+def test_kid_same_vs_shifted_distribution(rng):
+    x = rng.normal(0, 1, (400, 32))
+    same, _ = kid(x, rng.normal(0, 1, (300, 32)), subsets=20, subset_size=200)
+    shifted, _ = kid(x, rng.normal(0.5, 1, (300, 32)), subsets=20, subset_size=200)
+    assert abs(same) < 0.01 < shifted  # unbiased: ≈ 0 for equal distributions
+    assert kid(x, x[::-1], subsets=3, seed=1) == kid(x, x[::-1], subsets=3, seed=1)
+    assert kid(x, x[::-1], subsets=5)[1] > 0  # subsets ≤ half the set: never all identical
+    with pytest.raises(ValueError):
+        kid(x[:3], x)
 
 
 # ---------- entropy / correlation ----------

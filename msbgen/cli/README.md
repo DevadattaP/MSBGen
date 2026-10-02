@@ -10,9 +10,10 @@ python -m msbgen.cli.<tool> --help
 | --- | --- |
 | [`analyze`](analyze.py) | Dataset-level bit-plane analysis → CSV, JSON and plots |
 | [`prepare_data`](prepare_data.py) | Download and convert datasets (DIV2K, Kodak) to grayscale `.npy` |
-| [`train`](train.py) | Train a baseline (CNN / U-Net) or the conditional diffusion model |
+| [`train`](train.py) | Train a baseline (CNN / U-Net) or a generative model (diffusion, flow matching) |
 | [`evaluate`](evaluate.py) | Score the fills (zero / mid / random) and trained checkpoints on a test set |
 | [`plot_runs`](plot_runs.py) | Plot training histories (loss, PSNR, SSIM, LR) and export them as CSV |
+| [`plot_eval`](plot_eval.py) | Plot evaluation results: all metrics per method, perception vs distortion, paired per-image comparison |
 
 The baseline workflow, end to end:
 
@@ -28,7 +29,8 @@ The generative model (Milestone 3) uses the same tools:
 
 ```shell
 python -m msbgen.cli.train --preset diffusion           # → runs/diffusion/best.pt
-python -m msbgen.cli.evaluate data/processed/kodak --models runs/*/best.pt --lpips --samples 4
+python -m msbgen.cli.evaluate data/processed/kodak --models runs/*/best.pt --lpips --dists --kid --samples 4
+python -m msbgen.cli.plot_eval                          # evaluation plots → outputs/plots/
 ```
 
 Every tool is a thin layer over [`msbgen.core`](../core/README.md). The numbers
@@ -211,6 +213,7 @@ in [`msbgen/data/README.md`](../data/README.md).
 python -m msbgen.cli.train --preset unet-res                 # PLAN baseline 4
 python -m msbgen.cli.train --preset cnn --steps 10000        # override any option
 python -m msbgen.cli.train --preset diffusion                # Milestone 3
+python -m msbgen.cli.train --preset flow                     # Milestone 4
 python -m msbgen.cli.train --resume runs/unet-res/last.pt --preset unet-res
 ```
 
@@ -222,6 +225,7 @@ python -m msbgen.cli.train --resume runs/unet-res/last.pt --preset unet-res
 | `unet` | `UNet` width 24, 4 levels (4.4 M params) | direct: predicts I | Baseline 3: U-Net |
 | `unet-res` | same U-Net | residual: predicts R = I − 128·B7 | Baseline 4: residual prediction |
 | `diffusion` | `MSBDiffusion`: `TimeUNet` width 32, 4 levels, 1 block (4.0 M params); EMA 0.999, 40k steps, validation every 2k | samples R ~ p(R \| B7) | Milestone 3: conditional diffusion |
+| `flow` | `MSBFlow`: the same network and training as `diffusion`; velocity loss on straight paths | samples R ~ p(R \| B7) | Milestone 4: conditional flow matching |
 
 **`--resume` rebuilds the configuration from the command line**, so repeat the same
 preset and options (and the same `--steps`: the learning-rate schedule depends on it).
@@ -232,18 +236,19 @@ preset and options (and the same `--steps`: the learning-rate schedule depends o
 | --- | --- | --- |
 | `--preset` | | One of the presets above |
 | `--name` | the preset name | Run name; output goes to `<out-dir>/<name>/` |
-| `--kind` | from the preset | `regression` or `diffusion` |
+| `--kind` | from the preset | `regression`, `diffusion` or `flow` |
 | `--arch`, `--output` | from the preset | Regression only: `cnn`/`unet`, `direct`/`residual` |
-| `--width`, `--depth`, `--levels`, `--blocks` | from the preset | Model size (`--depth`: CNN; `--blocks`: ResBlocks per resolution, diffusion) |
+| `--width`, `--depth`, `--levels`, `--blocks` | from the preset | Model size (`--depth`: CNN; `--blocks`: ResBlocks per resolution, generative models) |
 | `--k` | 1 | Transmitted planes (the model input is B7 … B(8−k)) |
 | `--train`, `--val` | DIV2K train / valid | Folders of prepared `.npy` files (several allowed) |
-| `--steps` | 20000 (diffusion 40000) | Optimiser steps |
+| `--steps` | 20000 (generative presets 40000) | Optimiser steps |
 | `--batch-size`, `--crop` | 16, 128 | Batch of random crops |
 | `--lr` | 2e-4 | Adam learning rate; 500-step warm-up, then cosine decay to 1e-6 |
 | `--loss` | mse | Regression only: `mse` (as in PLAN.md) or `l1` |
-| `--val-every`, `--val-limit` | 1000 (diffusion 2000), all | Validation interval / number of validation images |
-| `--ema` | 0 (diffusion 0.999) | Decay of an exponential moving average of the weights; validation and the saved inference weights use it. 0 = off |
-| `--val-sample-steps` | 25 | Diffusion: DDIM steps for the validation samples |
+| `--val-every`, `--val-limit` | 1000 (generative presets 2000), all | Validation interval / number of validation images |
+| `--ema` | 0 (generative presets 0.999) | Decay of an exponential moving average of the weights; validation and the saved inference weights use it. 0 = off |
+| `--val-sample-steps` | 25 | Generative models: sampling steps for the validation samples |
+| `--solver` | euler | Flow matching only: default ODE solver (`euler` / `heun`), used in validation and stored in the checkpoint |
 | `--log-every` | 100 | Training-loss log interval |
 | `--workers` | 4 | DataLoader processes |
 | `--seed` | 0 | Makes the crop stream and initialisation reproducible |
@@ -283,17 +288,17 @@ about 1.8× longer than its compute time.
 | `config.json` | Full training and model configuration |
 | `log.jsonl` | The full training history (see below) |
 | `last.pt` | Latest checkpoint, written at every validation, before every thermal pause, and on **Ctrl-C** |
-| `best.pt` | Best checkpoint so far: highest validation PSNR (regression) or lowest validation loss (diffusion). This is what `evaluate` and the web app use |
+| `best.pt` | Best checkpoint so far: highest validation PSNR (regression) or lowest validation loss (generative models). This is what `evaluate` and the web app use |
 
-With EMA (diffusion), a checkpoint's `state_dict` holds the EMA weights and
+With EMA (generative models), a checkpoint's `state_dict` holds the EMA weights and
 `train_state_dict` the raw weights that `--resume` continues from.
 
 **Training history (`log.jsonl`)** has one JSON object per line, of two kinds:
 
 | Record | When | Fields |
 | --- | --- | --- |
-| training | every `--log-every` steps | `step`, `epoch`, `loss` (mean over those steps), `train_psnr` (PSNR of that mean MSE; `null` for diffusion), `lr`, `it_per_s`, `gpu_temp`, `cpu_temp`, `paused_s` |
-| validation | step 0, then every `--val-every` steps | `step`, `epoch`, `val_loss`, `val_psnr`, `val_psnr_mid`, `val_psnr_random`, `val_gain_db`, `val_ssim`, `val_ssim_mid`, `val_ssim_random`, `val_msb_consistency`, `best_val_psnr` (regression) or `best_val_loss` (diffusion) |
+| training | every `--log-every` steps | `step`, `epoch`, `loss` (mean over those steps), `train_psnr` (PSNR of that mean MSE; `null` for generative models), `lr`, `it_per_s`, `gpu_temp`, `cpu_temp`, `paused_s` |
+| validation | step 0, then every `--val-every` steps | `step`, `epoch`, `val_loss`, `val_psnr`, `val_psnr_mid`, `val_psnr_random`, `val_gain_db`, `val_ssim`, `val_ssim_mid`, `val_ssim_random`, `val_msb_consistency`, `best_val_psnr` (regression) or `best_val_loss` (generative models) |
 
 - Training counts steps, not epochs. `epoch` = pixels seen / pixels in the training
   set, so it is fractional: 20k steps × 16 crops of 128² ≈ 2.4 epochs of DIV2K.
@@ -354,6 +359,32 @@ How to read them: validation loss rising while training loss keeps falling means
 overfitting. A gain curve that flattens means more steps won't help, and a bigger
 model or more context might.
 
+## `plot_eval`: evaluation plots
+
+```shell
+python -m msbgen.cli.plot_eval                                     # every outputs/eval/*/ with a summary.json
+python -m msbgen.cli.plot_eval outputs/eval/kodak-s8 --pair diffusion unet-res
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `evals` | all of `outputs/eval/*/` | Evaluation folders (written by [`evaluate`](#evaluate-score-methods-on-a-test-set)) |
+| `--out DIR` | `outputs/plots` | Output folder |
+| `--pair A B` | the generative model vs the best-PSNR regression model | Methods for the paired plot |
+
+**Outputs** (per evaluation folder `<name>`):
+
+| File | Content |
+| --- | --- |
+| `eval_<name>_metrics.png` | One panel per metric (PSNR, SSIM, LPIPS, DISTS, KID), the same method order in each, coloured by kind (fill, regression, generative); the best value is labelled. Hollow circles in the PSNR panel: PSNR of the mean of the samples. |
+| `eval_<name>_perception.png` | Perception vs distortion: PSNR against DISTS and LPIPS. Better is towards the bottom right; a generative model is expected to sit lower and further left than regression. |
+| `eval_<name>_paired.png` | One point per image, A against B on each per-image metric, with the y = x line and how many images A wins |
+
+Whiskers on per-image metrics are 95 % intervals of the mean over images. They are
+unpaired, so two methods can differ reliably even when their whiskers overlap: the
+paired plot shows that directly. KID whiskers are the std over KID subsets; summaries
+written before that was fixed show none ("no spread: rerun evaluate").
+
 ## `evaluate`: score methods on a test set
 
 ```shell
@@ -364,7 +395,7 @@ Every method gets **only the top-k bits** of each image (through the
 `Reconstructor` interface) and is scored against the original. The zero, midpoint
 and random fills are included as baselines by default.
 
-**Stochastic methods** (random fill, diffusion) are scored on their first sample
+**Stochastic methods** (random fill, diffusion, flow matching) are scored on their first sample
 (seed 0). With `--samples N` they are drawn N times (seeds 0 … N−1), which adds
 two metrics:
 
@@ -375,19 +406,23 @@ two metrics:
 - `diversity`: the mean per-pixel standard deviation across the samples, in
   intensity levels. 0 means every sample is identical.
 
-The thermal guard is checked between images and after every diffusion denoising
-step.
+The thermal guard is checked between images and after every sampling step of a
+generative model.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `data` | required | Folder of prepared `.npy` files or ordinary images (converted to grayscale) |
-| `--models` | none | Checkpoints (regression or diffusion); each is named after its run folder |
+| `--models` | none | Checkpoints (regression, diffusion or flow); each is named after its run folder |
 | `--samples N` | 1 | Draws per image for stochastic methods |
-| `--sample-steps` | checkpoint's (50) | Diffusion: DDIM steps |
+| `--sample-steps` | checkpoint's (50) | Generative models: DDIM / ODE steps |
 | `--eta` | checkpoint's (0) | Diffusion: DDIM eta; 0 = deterministic given the starting noise, 1 = fresh noise every step |
+| `--solver` | checkpoint's (euler) | Flow matching: ODE solver, `euler` or `heun` |
 | `--k` | 1 | Transmitted planes; models trained for another k are skipped |
 | `--fills` | `zero mid random` | Fill baselines to include |
 | `--lpips` | off | Also compute LPIPS (downloads AlexNet weights once) |
+| `--dists` | off | Also compute DISTS (needs `piq`; downloads VGG16 + DISTS weights once) |
+| `--kid` | off | Also compute patch KID per method against the originals (needs `piq`; downloads the FID Inception once) |
+| `--kid-patch PX` | 128 | KID patch size: a non-overlapping grid plus the grid shifted by PX/2 (39 patches per Kodak image) |
 | `--no-ssim` | off | Skip SSIM |
 | `--limit N` | all | First N images only |
 | `--save-images N` | 4 | Save reconstructions and a comparison strip for the first N images |
@@ -399,11 +434,18 @@ step.
 
 | File | Content |
 | --- | --- |
-| `per_image.csv` | `image, method, psnr, ssim, lpips, mae, msb_consistency, psnr_avg, diversity, time_s` (`time_s`: seconds for one reconstruction) |
-| `summary.json` | Per method: mean and std of each metric over images, plus checkpoint path, step, model config and, for diffusion, `sample_steps` and `eta` |
+| `per_image.csv` | `image, method, psnr, ssim, lpips, dists, mae, msb_consistency, psnr_avg, diversity, time_s` (`time_s`: seconds for one reconstruction) |
+| `summary.json` | Per method: mean and std of each metric over images, plus checkpoint path, step, model config and, for generative models, the sampler (`sample_steps` and `eta` or `solver`). With `--kid`, `kid` holds the mean and std over 100 random KID subsets (each at most half the patches, so the std is a conservative error bar), the patch counts and the subset size |
 | `images/<image>_<method>.png` | Rounded 8-bit reconstructions (sample 0 for stochastic methods) |
 | `images/<image>_compare.png` | Original and every method side by side, labelled with PSNR |
 | `images/<image>_<method>_samples.png` | With `--samples` > 1: original, every sample, their mean and their per-pixel std × 4 |
+
+KID is a set-level score, so it is not in `per_image.csv`. It compares Inception
+features of patches from a method's outputs (every sample, for a stochastic
+method) with those of the original images' patches, and asks only whether the
+outputs *look like* real images, regardless of pixel alignment. 24 Kodak images
+are far too few for FID, but their ~900 patches are enough for KID, which is
+unbiased at small sizes. The table shows it × 1000.
 
 A summary table is printed as well. `msb_consistency` is the fraction of pixels
 whose reconstruction keeps the transmitted bits. It is always 1 for the fills and

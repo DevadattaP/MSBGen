@@ -143,6 +143,28 @@
         <div class="table-wrap"><table id="models-table" class="data-table"></table></div>
       </section>
     </section>
+
+    <section id="evals" class="results" aria-labelledby="evals-title" hidden>
+      <div class="results-head">
+        <h2 id="evals-title">Test-set evaluation</h2>
+        <p id="evals-summary" class="hint"></p>
+      </div>
+      <section class="card analysis-card" aria-labelledby="evals-card-title">
+        <div class="card-head">
+          <h3 id="evals-card-title">Saved results from <code>msbgen.cli.evaluate</code></h3>
+          <div id="evals-pick" class="seg" role="group" aria-label="Evaluation"></div>
+        </div>
+        <p class="hint">
+          Means over the test images; the best value in each column is bold. <strong>LPIPS</strong> and
+          <strong>DISTS</strong> compare deep features (lower is better); DISTS tolerates plausible texture that is
+          not pixel-aligned. <strong>KID</strong> is one score per method: how much its output patches look like
+          patches of real images, regardless of alignment (× 10³, lower is better). Stochastic methods are scored on
+          one sample; <strong>PSNR avg</strong> is the PSNR of the mean of all samples and <strong>Diversity</strong>
+          the per-pixel spread between them, in intensity levels.
+        </p>
+        <div class="table-wrap"><table id="evals-table" class="data-table"></table></div>
+      </section>
+    </section>
   </main>
 
   <dialog id="lightbox" class="lightbox">

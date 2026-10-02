@@ -9,6 +9,8 @@ Presets (override any option after them):
     --preset unet-res   baseline 4: U-Net, residual output (predicts R = I - 128·B7)
     --preset diffusion  Milestone 3: conditional diffusion on R (time-conditioned U-Net,
                         v-prediction, EMA 0.999, 40k steps, validation every 2k steps)
+    --preset flow       Milestone 4: conditional flow matching on R (same network and
+                        training as the diffusion preset, straight-path velocity loss)
 """
 
 from __future__ import annotations
@@ -23,7 +25,10 @@ PRESETS = {
     "unet-res": {"arch": "unet", "output": "residual", "arch_args": {"width": 24, "levels": 4}},
     "diffusion": {"kind": "diffusion", "arch_args": {"width": 32, "levels": 4, "blocks": 1},
                   "train": {"steps": 40_000, "ema": 0.999, "val_every": 2_000}},
+    "flow": {"kind": "flow", "arch_args": {"width": 32, "levels": 4, "blocks": 1},
+             "train": {"steps": 40_000, "ema": 0.999, "val_every": 2_000}},
 }
+GENERATIVE = ("diffusion", "flow")
 TRAIN_DEFAULTS = {"steps": 20_000, "ema": 0.0, "val_every": 1_000}
 
 
@@ -32,25 +37,28 @@ def main(argv: list[str] | None = None) -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--preset", choices=PRESETS, help="preset (sets model kind, arch, output, size)")
     p.add_argument("--name", help="run name (default: the preset name); output goes to <out-dir>/<name>/")
-    p.add_argument("--kind", choices=["regression", "diffusion"], help="model kind (default: from the preset)")
+    p.add_argument("--kind", choices=["regression", *GENERATIVE], help="model kind (default: from the preset)")
     p.add_argument("--arch", choices=["cnn", "unet"], help="regression backbone")
     p.add_argument("--output", choices=["direct", "residual"], help="regression output mode")
     p.add_argument("--width", type=int, help="channels (CNN) / first-level channels (U-Nets)")
     p.add_argument("--depth", type=int, help="CNN layers")
     p.add_argument("--levels", type=int, help="U-Net downsampling levels")
-    p.add_argument("--blocks", type=int, help="diffusion: ResBlocks per resolution")
+    p.add_argument("--blocks", type=int, help="generative models: ResBlocks per resolution")
     p.add_argument("--k", type=int, default=1, help="number of transmitted MSB planes (default 1)")
     p.add_argument("--train", nargs="+", default=["data/processed/div2k-train"], help="training folders of .npy")
     p.add_argument("--val", nargs="+", default=["data/processed/div2k-valid"], help="validation folders of .npy")
     p.add_argument("--out-dir", default="runs")
-    p.add_argument("--steps", type=int, help="training steps (default 20k; diffusion preset 40k)")
+    p.add_argument("--steps", type=int, help="training steps (default 20k; generative presets 40k)")
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--crop", type=int, default=128)
     p.add_argument("--lr", type=float, default=2e-4)
     p.add_argument("--loss", choices=["mse", "l1"], default="mse")
-    p.add_argument("--val-every", type=int, help="validate every N steps (default 1k; diffusion preset 2k)")
-    p.add_argument("--ema", type=float, help="EMA decay of the weights, 0 = off (default 0; diffusion preset 0.999)")
-    p.add_argument("--val-sample-steps", type=int, default=25, help="diffusion: DDIM steps for validation samples")
+    p.add_argument("--val-every", type=int, help="validate every N steps (default 1k; generative presets 2k)")
+    p.add_argument("--ema", type=float, help="EMA decay of the weights, 0 = off (default 0; generative presets 0.999)")
+    p.add_argument("--val-sample-steps", type=int, default=25,
+                   help="generative models: sampling steps for validation samples (default 25)")
+    p.add_argument("--solver", choices=["euler", "heun"],
+                   help="flow matching: default ODE solver, used in validation and stored in the checkpoint (euler)")
     p.add_argument("--log-every", type=int, default=100)
     p.add_argument("--val-limit", type=int, help="use only the first N validation images")
     p.add_argument("--workers", type=int, default=4)
@@ -67,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     from msbgen.models.diffusion import DiffusionConfig
+    from msbgen.models.flow import FlowConfig
     from msbgen.models.msb_net import ModelConfig
     from msbgen.training import TrainConfig, train
     from msbgen.utils.thermal import ThermalLimits
@@ -74,8 +83,10 @@ def main(argv: list[str] | None = None) -> int:
     base = dict(PRESETS.get(args.preset, {"arch": "unet", "output": "residual", "arch_args": {"width": 24, "levels": 4}}))
     kind = args.kind or base.get("kind", "regression")
     if kind != base.get("kind", "regression"):  # e.g. --preset unet --kind diffusion: preset sizes don't apply
-        base = PRESETS["diffusion"] if kind == "diffusion" else {"arch": "unet", "output": "residual", "arch_args": {}}
-    if kind == "diffusion":
+        base = PRESETS[kind] if kind in GENERATIVE else {"arch": "unet", "output": "residual", "arch_args": {}}
+    if args.solver and kind != "flow":
+        p.error("--solver only applies to flow matching")
+    if kind in GENERATIVE:
         arch_args = dict(base["arch_args"])
         options = ("width", "levels", "blocks")
     else:
@@ -96,6 +107,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if kind == "diffusion":
             model = DiffusionConfig(k=args.k, arch_args=arch_args)
+        elif kind == "flow":
+            model = FlowConfig(k=args.k, arch_args=arch_args, solver=args.solver or "euler")
         else:
             model = ModelConfig(arch=arch, output=args.output or base["output"], k=args.k, arch_args=arch_args)
         thermal = ThermalLimits(args.gpu_max_temp, args.gpu_resume_temp, args.cpu_max_temp, args.cpu_resume_temp)
