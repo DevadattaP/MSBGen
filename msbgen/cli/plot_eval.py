@@ -85,13 +85,16 @@ LABEL_OFFSETS = [(7, 4, "left"), (7, -11, "left"), (-7, 4, "right"), (-7, -11, "
                  (7, 15, "left"), (7, -22, "left"), (-7, 15, "right"), (-7, -22, "right")]
 
 
-def _place_labels(fig, ax, points: list[tuple[str, float, float]]) -> None:
-    """Name every point, trying a few offsets so labels don't overlap each other or the points."""
+def _place_labels(fig, ax, points: list[tuple[str, float, float]], offsets=LABEL_OFFSETS,
+                  taken: list | None = None) -> list:
+    """Name every point, trying `offsets` in order so labels don't overlap each other, the
+    points, or the boxes in `taken` (from an earlier call). Returns all boxes now taken."""
     renderer = fig.canvas.get_renderer()
-    taken = [ax.transData.transform((x, y)) for _, x, y in points]
-    taken = [(px - 6, py - 6, px + 6, py + 6) for px, py in taken]  # marker boxes, display px
+    taken = list(taken or [])
+    markers = [ax.transData.transform((x, y)) for _, x, y in points]
+    taken += [(px - 6, py - 6, px + 6, py + 6) for px, py in markers]  # marker boxes, display px
     for n, x, y in points:
-        for dx, dy, ha in LABEL_OFFSETS:
+        for dx, dy, ha in offsets:
             text = ax.annotate(n, (x, y), xytext=(dx, dy), textcoords="offset points", ha=ha, fontsize=8, color=INK)
             bb = text.get_window_extent(renderer)
             box = (bb.x0, bb.y0, bb.x1, bb.y1)
@@ -99,11 +102,13 @@ def _place_labels(fig, ax, points: list[tuple[str, float, float]]) -> None:
                 break
             text.remove()
         else:  # nothing fits: keep the first position
-            text = ax.annotate(n, (x, y), xytext=LABEL_OFFSETS[0][:2], textcoords="offset points", fontsize=8,
+            dx, dy, ha = offsets[0]
+            text = ax.annotate(n, (x, y), xytext=(dx, dy), textcoords="offset points", ha=ha, fontsize=8,
                                color=INK)
             bb = text.get_window_extent(renderer)
             box = (bb.x0, bb.y0, bb.x1, bb.y1)
         taken.append(box)
+    return taken
 
 
 def plot_metrics(plt, name: str, summary: dict, path: Path) -> bool:

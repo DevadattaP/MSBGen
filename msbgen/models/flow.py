@@ -45,7 +45,7 @@ class FlowConfig:
     bit_depth: int = 8
     channels: int = 1
     arch_args: dict = field(default_factory=lambda: {"width": 32, "levels": 4, "blocks": 1})
-    sample_steps: int = 50  # default number of ODE steps at inference
+    sample_steps: int = 3  # default number of ODE steps at inference (Kodak k = 1: 3 beats 50 on every metric)
     solver: str = "euler"  # default ODE solver at inference: "euler" or "heun"
 
     def __post_init__(self):

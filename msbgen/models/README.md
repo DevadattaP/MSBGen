@@ -129,7 +129,8 @@ investigating; it behaves well at both ends of the schedule, unlike $\varepsilon
 at $t = 1$). The loss is $\lVert \hat v - v \rVert^2$ with $t \sim U(0, 1)$.
 
 **Sampling (DDIM).** Start from $x_1 = z \sim \mathcal N(0, I)$ and step
-$t = 1 \to 0$ in `sample_steps` equal steps (default 50). At each step,
+$t = 1 \to 0$ in `sample_steps` equal steps (default 3; runs trained before the step sweep
+store 50, see [the step sweep](../../README.md#flow-matching-results-kodak)). At each step,
 $\hat r = \text{clip}(\alpha_t x_t - \sigma_t \hat v, -1, 1)$ and
 $\hat\varepsilon = (x_t - \alpha_t \hat r) / \sigma_t$. With `eta` = 0 the sampler is
 deterministic given $z$. With `eta` = 1 it adds fresh noise every step (DDPM-like).
@@ -226,7 +227,8 @@ $1 + \operatorname{Var}(r) \approx 1.33$, so the loss's floor is well above 0 an
 values are not comparable with the diffusion loss.
 
 **Sampling (ODE).** Start from $x_1 = z \sim \mathcal N(0, I)$ and integrate
-$dx/dt = v_\theta(x, t, B_7)$ to $t = 0$ in `sample_steps` equal steps (default 50):
+$dx/dt = v_\theta(x, t, B_7)$ to $t = 0$ in `sample_steps` equal steps (default 3, as for
+diffusion):
 
 | `solver` | Step | Network evaluations |
 | --- | --- | --- |

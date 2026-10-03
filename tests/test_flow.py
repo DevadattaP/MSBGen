@@ -139,6 +139,7 @@ def test_train_flow_cli_and_evaluate(tmp_path, capsys):
     run = tmp_path / "runs" / "fm"
     cfg = json.loads((run / "config.json").read_text())
     assert cfg["model_kind"] == "flow" and cfg["ema"] == 0.999 and cfg["model"]["solver"] == "heun"
+    assert cfg["model"]["sample_steps"] == 3 and cfg["val_sample_steps"] == 2
     log = [json.loads(line) for line in (run / "log.jsonl").read_text().splitlines()]
     vals = [r for r in log if "val_psnr" in r]
     assert [r["step"] for r in vals] == [0, 2, 4] and all("best_val_loss" in r for r in vals)
@@ -146,6 +147,8 @@ def test_train_flow_cli_and_evaluate(tmp_path, capsys):
 
     with pytest.raises(SystemExit):  # the solver is a flow-matching option
         train_main(["--preset", "diffusion", "--solver", "heun"])
+    with pytest.raises(SystemExit):  # sampling steps are a generative option
+        train_main(["--preset", "unet-res", "--sample-steps", "5"])
 
     out = tmp_path / "eval"
     assert evaluate_main([str(data), "--models", str(run / "best.pt"), "--samples", "2", "--sample-steps", "2",
@@ -156,6 +159,24 @@ def test_train_flow_cli_and_evaluate(tmp_path, capsys):
     assert fm["sample_steps"] == 2 and fm["solver"] == "euler" and "eta" not in fm
     assert fm["label"] == "Flow matching (residual)" and fm["diversity"]["mean"] > 0
     assert summary_method_kind("fm", fm) == "generative"
+
+    # A second step count, then the step plots over both folders.
+    from msbgen.cli.plot_steps import collect
+    from msbgen.cli.plot_steps import main as plot_steps_main
+
+    out3 = tmp_path / "eval3"
+    assert evaluate_main([str(data), "--models", str(run / "best.pt"), "--samples", "2", "--fills", "mid",
+                          "--solver", "euler", "--out", str(out3), "--save-images", "0", "--device", "cpu",
+                          "--no-thermal-guard"]) == 0
+    meta, series, refs = collect([out, out3])
+    assert sorted(series) == ["fm"] and sorted(series["fm"]) == [2, 3] and "mid" in refs  # 3: checkpoint default
+    out4 = tmp_path / "eval4"  # the checkpoint's own solver (heun) is a separate series
+    assert evaluate_main([str(data), "--models", str(run / "best.pt"), "--samples", "2", "--fills",
+                          "--out", str(out4), "--save-images", "0", "--device", "cpu", "--no-thermal-guard"]) == 0
+    assert sorted(collect([out, out3, out4])[1]) == ["fm", "fm (heun)"]
+    plots = tmp_path / "plots"
+    assert plot_steps_main([str(out), str(out3), "--out", str(plots), "--name", "t"]) == 0
+    assert [p.name for p in plots.iterdir()] == ["steps_t_curves.png"]  # no trade-off plot without --dists
 
 
 def test_api_lists_and_runs_flow(tmp_path, monkeypatch):

@@ -55,8 +55,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--loss", choices=["mse", "l1"], default="mse")
     p.add_argument("--val-every", type=int, help="validate every N steps (default 1k; generative presets 2k)")
     p.add_argument("--ema", type=float, help="EMA decay of the weights, 0 = off (default 0; generative presets 0.999)")
-    p.add_argument("--val-sample-steps", type=int, default=25,
-                   help="generative models: sampling steps for validation samples (default 25)")
+    p.add_argument("--sample-steps", type=int,
+                   help="generative models: default sampling steps, stored in the checkpoint (default 3)")
+    p.add_argument("--val-sample-steps", type=int,
+                   help="generative models: sampling steps for validation samples (default: --sample-steps)")
     p.add_argument("--solver", choices=["euler", "heun"],
                    help="flow matching: default ODE solver, used in validation and stored in the checkpoint (euler)")
     p.add_argument("--log-every", type=int, default=100)
@@ -86,6 +88,8 @@ def main(argv: list[str] | None = None) -> int:
         base = PRESETS[kind] if kind in GENERATIVE else {"arch": "unet", "output": "residual", "arch_args": {}}
     if args.solver and kind != "flow":
         p.error("--solver only applies to flow matching")
+    if (args.sample_steps or args.val_sample_steps) and kind not in GENERATIVE:
+        p.error("--sample-steps / --val-sample-steps only apply to the generative models")
     if kind in GENERATIVE:
         arch_args = dict(base["arch_args"])
         options = ("width", "levels", "blocks")
@@ -105,10 +109,11 @@ def main(argv: list[str] | None = None) -> int:
             train_opts[key] = getattr(args, key)
 
     try:
+        sampler = {"sample_steps": args.sample_steps} if args.sample_steps is not None else {}
         if kind == "diffusion":
-            model = DiffusionConfig(k=args.k, arch_args=arch_args)
+            model = DiffusionConfig(k=args.k, arch_args=arch_args, **sampler)
         elif kind == "flow":
-            model = FlowConfig(k=args.k, arch_args=arch_args, solver=args.solver or "euler")
+            model = FlowConfig(k=args.k, arch_args=arch_args, solver=args.solver or "euler", **sampler)
         else:
             model = ModelConfig(arch=arch, output=args.output or base["output"], k=args.k, arch_args=arch_args)
         thermal = ThermalLimits(args.gpu_max_temp, args.gpu_resume_temp, args.cpu_max_temp, args.cpu_resume_temp)

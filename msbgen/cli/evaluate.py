@@ -90,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--models", nargs="*", type=Path, default=[], help="checkpoints (e.g. runs/*/best.pt)")
     p.add_argument("--samples", type=int, default=1, help="draws per image for stochastic methods (default 1)")
     p.add_argument("--sample-steps", type=int,
-                   help="generative models: sampling steps (DDIM / ODE; default: the checkpoint's, 50)")
+                   help="generative models: sampling steps (DDIM / ODE; default: the checkpoint's, 3 for new runs)")
     p.add_argument("--eta", type=float, help="diffusion: DDIM eta, 0 = deterministic given z (default: checkpoint's)")
     p.add_argument("--solver", choices=["euler", "heun"], help="flow matching: ODE solver (default: checkpoint's)")
     p.add_argument("--k", type=int, default=1, help="transmitted planes (default 1)")

@@ -14,6 +14,7 @@ python -m msbgen.cli.<tool> --help
 | [`evaluate`](evaluate.py) | Score the fills (zero / mid / random) and trained checkpoints on a test set |
 | [`plot_runs`](plot_runs.py) | Plot training histories (loss, PSNR, SSIM, LR) and export them as CSV |
 | [`plot_eval`](plot_eval.py) | Plot evaluation results: all metrics per method, perception vs distortion, paired per-image comparison |
+| [`plot_steps`](plot_steps.py) | Plot generative models against their number of sampling steps (curves and perception–distortion trade-off) |
 
 The baseline workflow, end to end:
 
@@ -247,7 +248,8 @@ preset and options (and the same `--steps`: the learning-rate schedule depends o
 | `--loss` | mse | Regression only: `mse` (as in PLAN.md) or `l1` |
 | `--val-every`, `--val-limit` | 1000 (generative presets 2000), all | Validation interval / number of validation images |
 | `--ema` | 0 (generative presets 0.999) | Decay of an exponential moving average of the weights; validation and the saved inference weights use it. 0 = off |
-| `--val-sample-steps` | 25 | Generative models: sampling steps for the validation samples |
+| `--sample-steps` | 3 | Generative models: default sampling steps (DDIM / ODE), stored in the checkpoint and used by `evaluate` and the web app |
+| `--val-sample-steps` | `--sample-steps` | Generative models: sampling steps for the validation samples |
 | `--solver` | euler | Flow matching only: default ODE solver (`euler` / `heun`), used in validation and stored in the checkpoint |
 | `--log-every` | 100 | Training-loss log interval |
 | `--workers` | 4 | DataLoader processes |
@@ -385,6 +387,30 @@ unpaired, so two methods can differ reliably even when their whiskers overlap: t
 paired plot shows that directly. KID whiskers are the std over KID subsets; summaries
 written before that was fixed show none ("no spread: rerun evaluate").
 
+## `plot_steps`: generative models against sampling steps
+
+```shell
+# one evaluate run per step count first, e.g. --sample-steps $s --out outputs/eval/kodak-gen-s$s
+python -m msbgen.cli.plot_steps outputs/eval/kodak-gen-s* outputs/eval/kodak-fm
+```
+
+Collects every generative method from the folders, keyed by its `sample_steps`. Each
+model is one series; a non-default sampler gets its own series, e.g. `flow (heun)` or
+`diffusion (η = 1)`. The regression models and the midpoint fill are reference points.
+All folders must be on the same data and k. If a model and step count appears in
+several folders, the most recently written summary wins.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `evals` | all of `outputs/eval/*/` | Evaluation folders |
+| `--out DIR` | `outputs/plots` | Output folder |
+| `--name` | `<data folder>-k<k>` | Name in the output files |
+
+| File | Content |
+| --- | --- |
+| `steps_<name>_curves.png` | PSNR, DISTS, KID and diversity against steps (log axis), one line per series with a 95 % band (KID: ± std), and the best-PSNR regression model as a dashed line |
+| `steps_<name>_tradeoff.png` | PSNR against DISTS, each series' step counts joined in order and labelled, with the regression models and midpoint fill as points (needs `--dists`) |
+
 ## `evaluate`: score methods on a test set
 
 ```shell
@@ -414,7 +440,7 @@ generative model.
 | `data` | required | Folder of prepared `.npy` files or ordinary images (converted to grayscale) |
 | `--models` | none | Checkpoints (regression, diffusion or flow); each is named after its run folder |
 | `--samples N` | 1 | Draws per image for stochastic methods |
-| `--sample-steps` | checkpoint's (50) | Generative models: DDIM / ODE steps |
+| `--sample-steps` | checkpoint's (3; 50 in runs trained before the step sweep) | Generative models: DDIM / ODE steps |
 | `--eta` | checkpoint's (0) | Diffusion: DDIM eta; 0 = deterministic given the starting noise, 1 = fresh noise every step |
 | `--solver` | checkpoint's (euler) | Flow matching: ODE solver, `euler` or `heun` |
 | `--k` | 1 | Transmitted planes; models trained for another k are skipped |

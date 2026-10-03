@@ -82,7 +82,7 @@ class TrainConfig:
     val_limit: int | None = None
     log_every: int = 100
     ema: float = 0.0  # EMA decay of the weights (0 = off); e.g. 0.999 for the generative models
-    val_sample_steps: int = 25  # generative models: sampling steps for the validation samples
+    val_sample_steps: int | None = None  # generative models: validation sampling steps (None: the model's)
     workers: int = 4
     seed: int = 0
     device: str = "auto"
@@ -125,12 +125,12 @@ def _psnr_per_image(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 
 @torch.no_grad()
 def validate(model: Models, loader: DataLoader, device: torch.device, loss_fn=F.mse_loss,
-             sample_steps: int = 25, on_step: Callable[[], object] | None = None) -> dict[str, float]:
+             sample_steps: int | None = None, on_step: Callable[[], object] | None = None) -> dict[str, float]:
     """Validation loss, and mean per-image PSNR / SSIM of the model and of the midpoint-fill
     and random-fill baselines on the same crops, plus MSB consistency.
 
     For the generative models, the loss uses fixed t and noise and the estimate is one
-    sample (`sample_steps` steps, the model's default sampler) from fixed noise. The random fill uses a fixed seed too, so
+    sample (`sample_steps` steps, default the model's own, with its default sampler) from fixed noise. The random fill uses a fixed seed too, so
     every validation of every run sees the same noise.
 
     `on_step` is called after every batch and every sampling step: generative validation

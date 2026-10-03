@@ -36,7 +36,7 @@ class DiffusionConfig:
     bit_depth: int = 8
     channels: int = 1
     arch_args: dict = field(default_factory=lambda: {"width": 32, "levels": 4, "blocks": 1})
-    sample_steps: int = 50  # default number of DDIM steps at inference
+    sample_steps: int = 3  # default number of DDIM steps at inference (Kodak k = 1: 3 beats 50 on every metric)
     eta: float = 0.0  # default DDIM eta: 0 = deterministic given z, 1 = ancestral (DDPM-like)
 
     def __post_init__(self):

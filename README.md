@@ -30,7 +30,7 @@ research questions and milestones.
 | Deterministic baselines (CNN / U-Net, residual prediction) | ✅ done: [results](#results-kodak) |
 | Conditional diffusion on the residual, p(R \| B7) | ✅ done: [results](#diffusion-results-kodak) |
 | Perceptual evaluation (DISTS, patch KID, plots, web UI) | ✅ done |
-| Conditional flow matching on the residual | 🚧 in progress |
+| Conditional flow matching on the residual | ✅ done: [results](#flow-matching-results-kodak) |
 | Normalizing flow | ⏳ |
 | Multi-MSB experiments, entropy coding, final codec | ⏳ |
 
@@ -298,7 +298,7 @@ different noise seeds give different plausible images.
 | | |
 | --- | --- |
 | Network | Time-conditioned U-Net (ResBlocks, GroupNorm, no attention), width 32, 4 levels: 4.0 M params. Input: noisy residual + $B_7$ planes |
-| Diffusion | Continuous-time cosine schedule, **v-prediction**, DDIM sampler (50 steps; `eta` 0 = deterministic given the noise, 1 = fresh noise every step) |
+| Diffusion | Continuous-time cosine schedule, **v-prediction**, DDIM sampler (3 steps by default, chosen by the [step sweep](#flow-matching-results-kodak); `eta` 0 = deterministic given the noise, 1 = fresh noise every step) |
 | Training | Same DIV2K crops, optimiser and LR schedule as the baselines; 40k steps, EMA 0.999; `best.pt` = lowest validation loss |
 | Evaluation | `--samples N`: PSNR of the average of N samples (`psnr_avg`) and per-pixel spread across samples (`diversity`) |
 
@@ -381,26 +381,77 @@ isolates the generative process:
 | --- | --- | --- |
 | Path from data to noise | $x_t = \alpha_t r + \sigma_t \varepsilon$ (cosine schedule) | $x_t = (1 - t)\, r + t\, \varepsilon$ (straight line) |
 | Network predicts | $v = \alpha_t \varepsilon - \sigma_t r$ | velocity $\varepsilon - r$ |
-| Sampler | DDIM, 50 steps | ODE, Euler (or Heun), 50 steps by default |
+| Sampler | DDIM | ODE, Euler (or Heun) |
+
+Both samplers default to 3 steps, chosen by the step sweep below. Checkpoints
+trained before the sweep store 50; pass `--sample-steps` to `evaluate` to override.
 
 ```shell
-# Train (same budget as the diffusion run: ≈ 5 h of compute, 9–10 h with validations and thermal pauses)
+# Train (same budget as the diffusion run: ≈ 5 h of compute on the MX350, 9–10 h with validations and thermal pauses)
 python -m msbgen.cli.train --preset flow
 
 # Evaluate next to diffusion and the baselines, then plot
 python -m msbgen.cli.evaluate data/processed/kodak --models runs/*/best.pt --lpips --dists --kid --samples 8 --out outputs/eval/kodak-fm
 python -m msbgen.cli.plot_eval outputs/eval/kodak-fm --pair flow diffusion
 
-# Steps vs quality: the claim to test is that straight paths need fewer steps
-python -m msbgen.cli.evaluate data/processed/kodak --models runs/flow/best.pt --dists --sample-steps 10 --out outputs/eval/kodak-fm-10
+# Step sweep: both generative models at each step count, then the step plots
+for s in 1 2 3 5 10 20 50; do
+  python -m msbgen.cli.evaluate data/processed/kodak --models runs/diffusion/best.pt runs/flow/best.pt \
+      --fills --dists --kid --samples 8 --sample-steps $s --out outputs/eval/kodak-gen-s$s
+done
+python -m msbgen.cli.plot_steps outputs/eval/kodak-gen-s* outputs/eval/kodak-fm
 ```
 
-What to compare against diffusion: DISTS / KID at equal steps, the same metrics at
-10–20 steps (where flow matching should degrade less), and `psnr_avg` / `diversity`
-(how well calibrated the samples are). Details in
-[msbgen/models/README.md](msbgen/models/README.md#conditional-flow-matching-flowpy).
+Details in [msbgen/models/README.md](msbgen/models/README.md#conditional-flow-matching-flowpy).
 
-**Results:** pending the full training run.
+#### Flow matching results (Kodak)
+
+Same 24 images, $k = 1$, 8 samples per image (seeds 0–7) for every generative row.
+Flow `best.pt` is at step 38k (lowest validation loss), trained on an H100. Every
+step count is a separate `evaluate` run (`outputs/eval/kodak-gen-s<N>`; 50 steps is
+`outputs/eval/kodak-fm`). KID is patch KID × 10³, with a spread of about ± 2–3.5.
+
+| Steps | Flow PSNR (dB) ↑ | Flow DISTS ↓ | Flow KID ↓ | Flow diversity | Diffusion PSNR | Diffusion DISTS | Diffusion KID |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | **18.26** | 0.275 | 73.8 | 3.6 | 17.88 | 0.277 | 80.4 |
+| 2 | 18.21 | 0.259 | **52.9** | 4.8 | 17.83 | 0.264 | 53.4 |
+| **3** | 18.11 | 0.252 | 54.9 | 6.2 | 17.75 | 0.257 | 54.6 |
+| 5 | 17.88 | **0.248** | 60.7 | 8.4 | 17.58 | 0.253 | 62.5 |
+| 10 | 17.41 | 0.251 | 69.8 | 12.0 | 17.23 | 0.256 | 72.6 |
+| 20 | 16.90 | 0.258 | 75.7 | 15.1 | 16.80 | 0.262 | 76.7 |
+| 50 | 16.45 | 0.264 | 79.1 | 17.6 | 16.33 | 0.269 | 77.1 |
+| *U-Net (residual)* | *18.60* | *0.293* | *79.8* | | | | |
+
+What the numbers show:
+
+- **Few steps beat many on every metric.** From 50 steps down to 3, PSNR rises by
+  1.7 dB, DISTS and KID both improve, and sampling is 17× cheaper. Diversity falls
+  steadily: fewer Euler / DDIM steps pull each sample towards the posterior mean.
+  One flow Euler step from pure noise lands exactly on the model's estimate of that
+  mean. The step count therefore moves the output along the perception–distortion
+  curve, from a regression-like estimate (1 step) to a full sample (50), and the
+  perceptual metrics are best in between: DISTS at 3–5 steps, KID at 2–3.
+- **At 2–5 steps, flow matching beats the best regression model perceptually.** At
+  3 steps it has better DISTS than the residual U-Net on **24 of 24** images
+  (−0.041 ± 0.007, paired 95 % interval) and KID 55 against 80, at a cost of 0.49 dB
+  PSNR. At 50 steps it gave up 2.15 dB and won DISTS on 20 of 24 images.
+- **Flow matching is ahead of diffusion at every step count, most at few steps.**
+  Its PSNR lead grows from +0.12 dB at 50 steps to +0.36–0.38 dB at 1–3 steps (22 of
+  24 images). Its DISTS lead is a steady −0.005, with the paired interval clear of 0
+  at every step count except 1. KID is a tie except at 1 step. Its mean of 8 samples
+  is about 0.3 dB closer to the original at every step count, and at 10–50 steps its
+  samples are slightly more diverse (about +1 level, 23–24 of 24 images).
+- **Caveat.** At 3 steps the samples have a third of the 50-step diversity: they sit
+  between the posterior mean and true posterior samples. For a codec that is a
+  legitimate operating point, but it is not faithful posterior sampling.
+  Full-resolution crops show 3–50 step samples of one seed with the same structure.
+  Their visible errors (shutters of the wrong brightness, invented window panes)
+  come from how little $B_7$ says, not from the sampler.
+
+Default sampler from here on: **3 steps** (Euler for flow matching, DDIM `eta` 0 for
+diffusion), DISTS-optimal is 5. Plots: `python -m msbgen.cli.plot_steps`
+(`steps_kodak-k1_curves.png`: PSNR, DISTS, KID and diversity against steps;
+`steps_kodak-k1_tradeoff.png`: PSNR against DISTS, step counts joined in order).
 
 ## Project structure
 
@@ -425,6 +476,7 @@ MSBGen/
 │   │   ├── train.py       # train a baseline or a generative model (diffusion, flow)
 │   │   ├── plot_runs.py   # training curves + history CSV
 │   │   ├── plot_eval.py   # evaluation plots: metrics, perception vs distortion, paired
+│   │   ├── plot_steps.py  # generative models against their number of sampling steps
 │   │   └── evaluate.py    # score fills + checkpoints on a test set
 │   ├── api/
 │   │   ├── routes.py      # /api/health, bitplanes, analysis, models, reconstruct, evaluations
@@ -573,9 +625,10 @@ The list is re-scanned on every call, so new runs appear without a restart.
 
 Multipart `file`, plus optional form fields `k` (default 1) and `models`
 (comma-separated names; default: every compatible model). The image must be
-8-bit; colour images are converted to grayscale, with a note. Diffusion models
-return their seed-0 sample (50 steps; about 11 s for a Kodak-sized image on the
-MX350, and the request waits if the thermal guard pauses). Returns the image
+8-bit; colour images are converted to grayscale, with a note. Diffusion and flow
+models return their seed-0 sample with the checkpoint's sampler (3 steps by default,
+about 1–2 s for a Kodak-sized image on the MX350; the request waits if the thermal
+guard pauses). Returns the image
 fields plus:
 
 ```json
