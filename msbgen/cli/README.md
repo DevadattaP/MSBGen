@@ -10,7 +10,7 @@ python -m msbgen.cli.<tool> --help
 | --- | --- |
 | [`analyze`](analyze.py) | Dataset-level bit-plane analysis → CSV, JSON and plots |
 | [`prepare_data`](prepare_data.py) | Download and convert datasets (DIV2K, Kodak) to grayscale `.npy` |
-| [`train`](train.py) | Train a baseline (CNN / U-Net) or a generative model (diffusion, flow matching) |
+| [`train`](train.py) | Train a baseline, diffusion/flow-matching model, or conditional normalizing flow |
 | [`evaluate`](evaluate.py) | Score the fills (zero / mid / random) and trained checkpoints on a test set |
 | [`plot_runs`](plot_runs.py) | Plot training histories (loss, PSNR, SSIM, LR) and export them as CSV |
 | [`plot_eval`](plot_eval.py) | Plot evaluation results: all metrics per method, perception vs distortion, paired per-image comparison |
@@ -215,6 +215,7 @@ python -m msbgen.cli.train --preset unet-res                 # PLAN baseline 4
 python -m msbgen.cli.train --preset cnn --steps 10000        # override any option
 python -m msbgen.cli.train --preset diffusion                # Milestone 3
 python -m msbgen.cli.train --preset flow                     # Milestone 4
+python -m msbgen.cli.train --preset normalizing-flow         # Milestone 5
 python -m msbgen.cli.train --resume runs/unet-res/last.pt --preset unet-res
 ```
 
@@ -227,6 +228,7 @@ python -m msbgen.cli.train --resume runs/unet-res/last.pt --preset unet-res
 | `unet-res` | same U-Net | residual: predicts R = I − 128·B7 | Baseline 4: residual prediction |
 | `diffusion` | `MSBDiffusion`: `TimeUNet` width 32, 4 levels, 1 block (4.0 M params); EMA 0.999, 40k steps, validation every 2k | samples R ~ p(R \| B7) | Milestone 3: conditional diffusion |
 | `flow` | `MSBFlow`: the same network and training as `diffusion`; velocity loss on straight paths | samples R ~ p(R \| B7) | Milestone 4: conditional flow matching |
+| `normalizing-flow` | `MSBNormalizingFlow`: conditional Glow, 4 scales × 4 coupling blocks, 128-pixel patches; 40k steps, likelihood checkpoint selection | samples R ~ p(R \| B7), no ODE steps | Milestone 5: conditional normalizing flow |
 
 **`--resume` rebuilds the configuration from the command line**, so repeat the same
 preset and options (and the same `--steps`: the learning-rate schedule depends on it).
@@ -237,9 +239,11 @@ preset and options (and the same `--steps`: the learning-rate schedule depends o
 | --- | --- | --- |
 | `--preset` | | One of the presets above |
 | `--name` | the preset name | Run name; output goes to `<out-dir>/<name>/` |
-| `--kind` | from the preset | `regression`, `diffusion` or `flow` |
+| `--kind` | from the preset | `regression`, `diffusion`, `flow` or `normalizing_flow` |
 | `--arch`, `--output` | from the preset | Regression only: `cnn`/`unet`, `direct`/`residual` |
 | `--width`, `--depth`, `--levels`, `--blocks` | from the preset | Model size (`--depth`: CNN; `--blocks`: ResBlocks per resolution, generative models) |
+| `--crop-size`, `--scales`, `--blocks-per-scale` | 128, 4, 4 | Normalizing flow: fixed patch size, squeeze scales, and Glow blocks per scale |
+| `--condition-width`, `--hidden-width` | 32, 64 | Normalizing flow: B7 feature width and coupling subnet width |
 | `--k` | 1 | Transmitted planes (the model input is B7 … B(8−k)) |
 | `--train`, `--val` | DIV2K train / valid | Folders of prepared `.npy` files (several allowed) |
 | `--steps` | 20000 (generative presets 40000) | Optimiser steps |
@@ -248,8 +252,8 @@ preset and options (and the same `--steps`: the learning-rate schedule depends o
 | `--loss` | mse | Regression only: `mse` (as in PLAN.md) or `l1` |
 | `--val-every`, `--val-limit` | 1000 (generative presets 2000), all | Validation interval / number of validation images |
 | `--ema` | 0 (generative presets 0.999) | Decay of an exponential moving average of the weights; validation and the saved inference weights use it. 0 = off |
-| `--sample-steps` | 3 | Generative models: default sampling steps (DDIM / ODE), stored in the checkpoint and used by `evaluate` and the web app |
-| `--val-sample-steps` | `--sample-steps` | Generative models: sampling steps for the validation samples |
+| `--sample-steps` | 3 | Diffusion / flow matching: DDIM / ODE sampling steps; not used by the normalizing flow |
+| `--val-sample-steps` | `--sample-steps` | Diffusion / flow matching: sampling steps for validation samples |
 | `--solver` | euler | Flow matching only: default ODE solver (`euler` / `heun`), used in validation and stored in the checkpoint |
 | `--log-every` | 100 | Training-loss log interval |
 | `--workers` | 4 | DataLoader processes |
@@ -461,7 +465,7 @@ generative model.
 | File | Content |
 | --- | --- |
 | `per_image.csv` | `image, method, psnr, ssim, lpips, dists, mae, msb_consistency, psnr_avg, diversity, time_s` (`time_s`: seconds for one reconstruction) |
-| `summary.json` | Per method: mean and std of each metric over images, plus checkpoint path, step, model config and, for generative models, the sampler (`sample_steps` and `eta` or `solver`). With `--kid`, `kid` holds the mean and std over 100 random KID subsets (each at most half the patches, so the std is a conservative error bar), the patch counts and the subset size |
+| `summary.json` | Per method: mean and std of each metric over images, plus checkpoint path, step, model kind/config and sampler settings (`sample_steps`/`eta`, `sample_steps`/`solver`, or normalizing-flow `patch_size`). With `--kid`, `kid` holds the mean and std over random KID subsets, patch counts, and subset size |
 | `images/<image>_<method>.png` | Rounded 8-bit reconstructions (sample 0 for stochastic methods) |
 | `images/<image>_compare.png` | Original and every method side by side, labelled with PSNR |
 | `images/<image>_<method>_samples.png` | With `--samples` > 1: original, every sample, their mean and their per-pixel std × 4 |

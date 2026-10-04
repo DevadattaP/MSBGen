@@ -96,10 +96,11 @@ FILL_RECONSTRUCTORS: dict[str, Reconstructor] = {r.name: r for r in (ZeroFill(),
 
 def summary_method_kind(name: str, entry: dict) -> str:
     """'fill', 'regression' or 'generative' for a method entry of an evaluation summary.json
-    (only generative models record sampler settings such as `sample_steps`)."""
+    (generative checkpoints record `model_kind`; older summaries use `sample_steps`)."""
     if name in FILL_RECONSTRUCTORS:
         return "fill"
-    return "generative" if "sample_steps" in entry else "regression"
+    return "generative" if entry.get("model_kind") in ("diffusion", "flow", "normalizing_flow") \
+        or "sample_steps" in entry else "regression"
 
 
 def round_estimate(estimate: np.ndarray, bit_depth: int) -> np.ndarray:

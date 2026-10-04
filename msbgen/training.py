@@ -2,11 +2,12 @@
 
 * regression (`ModelConfig`): CNN / U-Net baselines, MSE (or L1) to the original image;
   `best.pt` is the checkpoint with the highest validation PSNR.
-* generative: diffusion (`DiffusionConfig`, the v-prediction loss of `MSBDiffusion`) or
-  flow matching (`FlowConfig`, the velocity loss of `MSBFlow`); `best.pt` is the
-  checkpoint with the lowest validation loss (fixed t and noise, so it is comparable
-  between validations). Validation PSNR / SSIM are of one sample per crop, which is
-  expected to score *below* a regression model on PSNR (see msbgen/models/README.md).
+* generative: diffusion (`DiffusionConfig`), flow matching (`FlowConfig`), or a
+    conditional normalizing flow (`NormalizingFlowConfig`). Generative `best.pt`
+    checkpoints minimize validation loss; stochastic validation uses a fixed random
+    stream, and the normalizing-flow loss is dequantized NLL. Validation PSNR / SSIM
+    are of one sample per crop, which is expected to score *below* a regression model
+    on PSNR (see msbgen/models/README.md).
 
 With `ema` > 0 an exponential moving average of the weights is kept; validation and the
 saved inference weights use it (standard for generative models).

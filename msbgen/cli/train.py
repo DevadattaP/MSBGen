@@ -11,6 +11,8 @@ Presets (override any option after them):
                         v-prediction, EMA 0.999, 40k steps, validation every 2k steps)
     --preset flow       Milestone 4: conditional flow matching on R (same network and
                         training as the diffusion preset, straight-path velocity loss)
+    --preset normalizing-flow
+                        Milestone 5: conditional Glow likelihood on fixed-size residual patches
 """
 
 from __future__ import annotations
@@ -27,8 +29,9 @@ PRESETS = {
                   "train": {"steps": 40_000, "ema": 0.999, "val_every": 2_000}},
     "flow": {"kind": "flow", "arch_args": {"width": 32, "levels": 4, "blocks": 1},
              "train": {"steps": 40_000, "ema": 0.999, "val_every": 2_000}},
+    "normalizing-flow": {"kind": "normalizing_flow", "train": {"steps": 40_000, "val_every": 2_000}},
 }
-GENERATIVE = ("diffusion", "flow")
+GENERATIVE = ("diffusion", "flow", "normalizing_flow")
 TRAIN_DEFAULTS = {"steps": 20_000, "ema": 0.0, "val_every": 1_000}
 
 
@@ -44,6 +47,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--depth", type=int, help="CNN layers")
     p.add_argument("--levels", type=int, help="U-Net downsampling levels")
     p.add_argument("--blocks", type=int, help="generative models: ResBlocks per resolution")
+    p.add_argument("--crop-size", type=int, help="normalizing flow: fixed patch size (default: --crop)")
+    p.add_argument("--scales", type=int, help="normalizing flow: squeeze scales (default 4)")
+    p.add_argument("--blocks-per-scale", type=int, help="normalizing flow: Glow blocks per scale (default 4)")
+    p.add_argument("--condition-width", type=int, help="normalizing flow: B7 feature width (default 32)")
+    p.add_argument("--hidden-width", type=int, help="normalizing flow: coupling subnet width (default 64)")
     p.add_argument("--k", type=int, default=1, help="number of transmitted MSB planes (default 1)")
     p.add_argument("--train", nargs="+", default=["data/processed/div2k-train"], help="training folders of .npy")
     p.add_argument("--val", nargs="+", default=["data/processed/div2k-valid"], help="validation folders of .npy")
@@ -79,20 +87,27 @@ def main(argv: list[str] | None = None) -> int:
     from msbgen.models.diffusion import DiffusionConfig
     from msbgen.models.flow import FlowConfig
     from msbgen.models.msb_net import ModelConfig
+    from msbgen.models.normalizing_flow import NormalizingFlowConfig
     from msbgen.training import TrainConfig, train
     from msbgen.utils.thermal import ThermalLimits
 
     base = dict(PRESETS.get(args.preset, {"arch": "unet", "output": "residual", "arch_args": {"width": 24, "levels": 4}}))
     kind = args.kind or base.get("kind", "regression")
     if kind != base.get("kind", "regression"):  # e.g. --preset unet --kind diffusion: preset sizes don't apply
-        base = PRESETS[kind] if kind in GENERATIVE else {"arch": "unet", "output": "residual", "arch_args": {}}
+        preset = "normalizing-flow" if kind == "normalizing_flow" else kind
+        base = PRESETS[preset] if preset in PRESETS else {"arch": "unet", "output": "residual", "arch_args": {}}
     if args.solver and kind != "flow":
         p.error("--solver only applies to flow matching")
+    if kind == "normalizing_flow" and (args.sample_steps or args.val_sample_steps):
+        p.error("--sample-steps / --val-sample-steps do not apply to normalizing flows")
     if (args.sample_steps or args.val_sample_steps) and kind not in GENERATIVE:
         p.error("--sample-steps / --val-sample-steps only apply to the generative models")
-    if kind in GENERATIVE:
+    if kind in ("diffusion", "flow"):
         arch_args = dict(base["arch_args"])
         options = ("width", "levels", "blocks")
+    elif kind == "normalizing_flow":
+        arch_args = {}
+        options = ()
     else:
         arch = args.arch or base["arch"]
         arch_args = dict(base["arch_args"]) if arch == base["arch"] else {}
@@ -114,6 +129,14 @@ def main(argv: list[str] | None = None) -> int:
             model = DiffusionConfig(k=args.k, arch_args=arch_args, **sampler)
         elif kind == "flow":
             model = FlowConfig(k=args.k, arch_args=arch_args, solver=args.solver or "euler", **sampler)
+        elif kind == "normalizing_flow":
+            model = NormalizingFlowConfig(
+                k=args.k, crop_size=args.crop_size if args.crop_size is not None else args.crop,
+                scales=args.scales if args.scales is not None else 4,
+                blocks_per_scale=args.blocks_per_scale if args.blocks_per_scale is not None else 4,
+                condition_width=args.condition_width if args.condition_width is not None else 32,
+                hidden_width=args.hidden_width if args.hidden_width is not None else 64,
+            )
         else:
             model = ModelConfig(arch=arch, output=args.output or base["output"], k=args.k, arch_args=arch_args)
         thermal = ThermalLimits(args.gpu_max_temp, args.gpu_resume_temp, args.cpu_max_temp, args.cpu_resume_temp)

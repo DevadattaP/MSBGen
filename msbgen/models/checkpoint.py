@@ -3,7 +3,7 @@
 A checkpoint is a plain dict saved with `torch.save`, loadable with
 `torch.load(..., weights_only=True)` (no pickled classes):
 
-    {"format": "msbgen-checkpoint-v1", "model_kind": "regression" | "diffusion" | "flow",
+    {"format": "msbgen-checkpoint-v1", "model_kind": "regression" | "diffusion" | "flow" | "normalizing_flow",
      "model_config": {...}, "state_dict": {...}, "step": int, "metrics": {...},
      "train_config": {...}, "optimizer": {...}, "scheduler": {...},   (optional, for --resume)
      "train_state_dict": {...}}                                        (optional, see below)
@@ -24,13 +24,14 @@ from torch import nn
 from msbgen.models.diffusion import DiffusionConfig, MSBDiffusion
 from msbgen.models.flow import FlowConfig, MSBFlow
 from msbgen.models.msb_net import ModelConfig, MSBNet
+from msbgen.models.normalizing_flow import MSBNormalizingFlow, NormalizingFlowConfig
 
 FORMAT = "msbgen-checkpoint-v1"
 KINDS = {"regression": (ModelConfig, MSBNet), "diffusion": (DiffusionConfig, MSBDiffusion),
-         "flow": (FlowConfig, MSBFlow)}
-GENERATIVE_KINDS = ("diffusion", "flow")  # sample p(R | B7); trained with EMA, best.pt by validation loss
-ModelConfigs = ModelConfig | DiffusionConfig | FlowConfig
-Models = MSBNet | MSBDiffusion | MSBFlow
+         "flow": (FlowConfig, MSBFlow), "normalizing_flow": (NormalizingFlowConfig, MSBNormalizingFlow)}
+GENERATIVE_KINDS = ("diffusion", "flow", "normalizing_flow")
+ModelConfigs = ModelConfig | DiffusionConfig | FlowConfig | NormalizingFlowConfig
+Models = MSBNet | MSBDiffusion | MSBFlow | MSBNormalizingFlow
 
 
 def build_model(config: ModelConfigs) -> Models:

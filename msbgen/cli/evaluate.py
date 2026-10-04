@@ -220,7 +220,8 @@ def main(argv: list[str] | None = None) -> int:
                 entry["kid"] = {"mean": mean, "std": std, "patches": len(feats), "reference_patches": len(ref),
                                 "subset_size": kid_subset_size(len(feats), len(ref))}
         if hasattr(method, "path"):
-            entry.update(checkpoint=str(method.path), step=method.step, config=method.config.to_dict())
+            entry.update(checkpoint=str(method.path), step=method.step, config=method.config.to_dict(),
+                         model_kind=method.model.kind)
         if hasattr(method, "sampler"):
             entry.update(method.sampler)
         summary[method.name] = entry

@@ -14,6 +14,7 @@ tqdm>=4.66          # download progress bars (optional)
 
 # Models (baselines). For a CUDA build of torch, follow https://pytorch.org/get-started/
 torch>=2.2
+FrEIA>=0.2
 lpips>=0.1.4        # perceptual metric in `python -m msbgen.cli.evaluate --lpips`
 piq>=0.8            # DISTS and KID in `python -m msbgen.cli.evaluate --dists --kid`
 psutil>=5.9         # CPU temperature for the thermal guard

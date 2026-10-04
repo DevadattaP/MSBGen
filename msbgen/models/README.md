@@ -12,8 +12,9 @@ analysis tools still work without torch installed.
 | [`generative.py`](generative.py) | `ResidualGenerator`: what the generative models share (residual scaling, $B_7$ conditioning, `TimeUNet`) |
 | [`diffusion.py`](diffusion.py) | `MSBDiffusion`: conditional diffusion on the residual, p(R \| B7); `DiffusionConfig` |
 | [`flow.py`](flow.py) | `MSBFlow`: conditional flow matching on the residual, p(R \| B7); `FlowConfig` |
+| [`normalizing_flow.py`](normalizing_flow.py) | `MSBNormalizingFlow`: patchwise conditional Glow likelihood and inverse sampling; `NormalizingFlowConfig` |
 | [`checkpoint.py`](checkpoint.py) | `save_checkpoint`, `load_model`, `read_checkpoint`, `build_model`; `GENERATIVE_KINDS` |
-| [`reconstructor.py`](reconstructor.py) | `ModelReconstructor` / `DiffusionReconstructor` / `FlowReconstructor` (checkpoints as `Reconstructor`s, tiled inference), `load_reconstructor`, `discover_checkpoints` |
+| [`reconstructor.py`](reconstructor.py) | Checkpoint-backed regression and generative `Reconstructor`s, `load_reconstructor`, `discover_checkpoints` |
 | [`perceptual.py`](perceptual.py) | Deep-feature metrics: `LPIPS`, `DISTS`, and `InceptionFeatures` for KID |
 
 The training loop is in [`msbgen/training.py`](../training.py), and the
@@ -255,6 +256,46 @@ validation and stored in the checkpoint. The PSNR argument of
 A test runs the sampler with an *oracle* velocity $(x_t - r) / t$: with straight
 paths, both solvers must land exactly on the original image for any number of steps.
 
+## Conditional normalizing flow (`normalizing_flow.py`)
+
+Milestone 5 models the dequantized missing residual with a conditional Glow-style
+normalizing flow. This is distinct from `MSBFlow`: there is no time variable or ODE.
+The forward map sends residuals to standard-normal latents and accumulates an exact
+change-of-variables Jacobian for the *continuous, dequantized* data:
+
+$$
+\log p(y \mid B_7) = \log p(z) + \log\left|\det \frac{\partial z}{\partial y}\right|.
+$$
+
+**Data transform.** For each pixel, let $R=I-128B_7\in\{0,\ldots,127\}$.
+Training draws $u\sim U[0,1)$, forms $q=(R+u)/128$, then uses
+$y=\operatorname{logit}(q)$. The objective includes both the logit Jacobian and
+the 128-level dequantization correction, and is reported in bits per residual
+dimension. Validation fixes the random stream for repeatable checkpoint selection.
+
+**Architecture and condition.** The default event is a 128×128 single-channel
+residual patch. Four `pixel_unshuffle` scales feed four FrEIA `AllInOneBlock`
+Glow blocks per scale. Each block combines a conditional affine coupling, channel
+permutation, and global affine transform; its coupling subnet is a small CNN. A
+separate CNN turns the encoded B7 plane (the existing ±0.5 bit-plane encoding)
+into a matching 64, 32, 16, and 8 pixel feature pyramid. Each coupling receives
+the corresponding B7 feature map as its condition. Only the residual is
+transformed, so the transmitted bit is preserved when reconstructing.
+
+FrEIA blocks are built for fixed spatial dimensions. Larger images are split into
+non-overlapping 128×128 patches and modeled independently; edge padding is cropped
+away after sampling. This is an explicit limitation: neighboring patches do not
+share residual context, and the model likelihood assumes patchwise factorization.
+
+**Likelihood caveat.** Uniform dequantization gives a continuous-density estimate
+of discrete residual coding cost. It is not, by itself, a lossless coded bitrate.
+Exact bpp requires integrated discrete-bin probabilities and an entropy coder,
+which remains Milestone 8.
+
+Sampling draws Gaussian latents once and applies the inverse flow conditioned on
+B7. It has no sampler-step setting. Evaluation records the patch size and can draw
+multiple seeded samples for PSNR-of-the-mean, diversity, LPIPS, DISTS, and patch KID.
+
 ## Reconstructors (`reconstructor.py`)
 
 They wrap a checkpoint so it can be used anywhere a `Reconstructor` is expected: the
@@ -276,9 +317,11 @@ fm = load_reconstructor("runs/flow/best.pt", steps=20, solver="heun")      # Flo
 
 Sampler options that don't apply to a checkpoint's kind are ignored (`eta` for flow
 matching, `solver` for diffusion, both for regression), so callers can pass them
-all. `sampler` holds the settings in use; `evaluate` records it in `summary.json`.
+all. The normalizing flow has no step-count option and records its patch size.
+`sampler` holds the settings in use; `evaluate` records it in `summary.json`.
 
-**`DiffusionReconstructor`** and **`FlowReconstructor`** are `stochastic`. `reconstruct` returns the sample for
+**`DiffusionReconstructor`**, **`FlowReconstructor`**, and
+**`NormalizingFlowReconstructor`** are `stochastic`. `reconstruct` returns the sample for
 `seed` (default 0), and `sample(..., seed)` draws any other. The noise comes from a
 CPU generator, so a seed gives the same image on CPU and GPU. `on_step` is called
 after every network evaluation: `evaluate` and the web app pass their **thermal guard**

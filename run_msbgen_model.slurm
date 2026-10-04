@@ -49,34 +49,20 @@ echo
 echo "Starting MSBGen model run..."
 date
 
-R=$HOME/MSBGen/runs
-E=$HOME/MSBGen/outputs/eval
+python -m msbgen.cli.train --preset cnn --name cnn-k3 --k 3 --steps 20000 --device cuda --no-thermal-guard
+python -m msbgen.cli.train --preset unet --name unet-k3 --k 3 --steps 20000 --device cuda --no-thermal-guard
+python -m msbgen.cli.train --preset unet-res --name unet-res-k3 --k 3 --steps 20000 --device cuda --no-thermal-guard
+python -m msbgen.cli.train --preset diffusion --name diffusion-k3 --k 3 --steps 40000 --device cuda --no-thermal-guard
+python -m msbgen.cli.train --preset flow --name flow-k3 --k 3 --steps 40000 --device cuda --no-thermal-guard
 
-echo "=== Step 1: train all k=2 models: $(date)"
-for p in cnn unet unet-res flow diffusion; do
-    python -m msbgen.cli.train --preset $p --k 2 --name $p-k2 --no-thermal-guard
-    ls -la $R/$p-k2
-done
+python -m msbgen.cli.evaluate data/processed/kodak \
+      --models runs/cnn-k3/best.pt runs/unet-k3/best.pt runs/unet-res-k3/best.pt \
+      runs/diffusion-k3/best.pt runs/flow-k3/best.pt \
+      --lpips --dists --kid --samples 8 --sample-steps 3 \
+      --out outputs/eval/kodak-k3 --no-thermal-guard
 
-echo "=== Step 2: main evaluation (all models + fills, 3 steps for generative): $(date)"
-python -m msbgen.cli.evaluate data/processed/kodak --k 2 --models $R/*-k2/best.pt \
-    --lpips --dists --kid --samples 8 --out $E/kodak-k2 --no-thermal-guard
-ls -la $E/kodak-k2
-
-echo "=== Step 3: step sweep: $(date)"
-for s in 1 2 3 5 10 20 50; do
-    python -m msbgen.cli.evaluate data/processed/kodak --k 2 \
-        --models $R/flow-k2/best.pt $R/diffusion-k2/best.pt --fills \
-        --dists --kid --samples 8 --sample-steps $s --out $E/kodak-k2-gen-s$s --no-thermal-guard
-    ls -la $E/kodak-k2-gen-s$s
-done
-
-echo "=== Step 4: plots: $(date)"
-P=$HOME/MSBGen/outputs/plots/k2
-python -m msbgen.cli.plot_runs $R/cnn-k2 $R/unet-k2 $R/unet-res-k2 $R/flow-k2 $R/diffusion-k2 --out $P
-python -m msbgen.cli.plot_eval $E/kodak-k2 --pair flow-k2 unet-res-k2 --out $P
-python -m msbgen.cli.plot_steps $E/kodak-k2-gen-s* $E/kodak-k2 --out $P
-ls -la $P
+python -m msbgen.cli.plot_eval outputs/eval/kodak-k3 \
+      --pair flow-k3 unet-res-k3 --out outputs/plots/k3
 sync
 echo "=== Done: $(date)"
 

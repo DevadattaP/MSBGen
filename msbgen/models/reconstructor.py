@@ -179,7 +179,35 @@ class FlowReconstructor(_SamplingReconstructor):
         return {"solver": self.solver}
 
 
-SAMPLER_OPTIONS = {"diffusion": ("steps", "eta"), "flow": ("steps", "solver")}
+class NormalizingFlowReconstructor(_CheckpointReconstructor):
+    """Samples a conditional normalizing-flow checkpoint in fixed-size patches."""
+
+    stochastic = True
+
+    def __init__(self, checkpoint: Path, device: str | torch.device | None = None,
+                 name: str | None = None, on_step: Callable[[], object] | None = None):
+        super().__init__(checkpoint, device, name, tile=512, margin=0)
+        self.tile = self.config.crop_size
+        self.on_step = on_step
+        self.label = "Normalizing flow (residual)"
+
+    @property
+    def sampler(self) -> dict:
+        return {"patch_size": self.config.crop_size}
+
+    def reconstruct(self, top: np.ndarray, k: int, bit_depth: int) -> np.ndarray:
+        return self.sample(top, k, bit_depth, seed=0)
+
+    @torch.no_grad()
+    def sample(self, top: np.ndarray, k: int, bit_depth: int, seed: int) -> np.ndarray:
+        self._check(top, k, bit_depth)
+        x = _to_tensor(top).to(self.device)
+        generator = torch.Generator(device="cpu").manual_seed(seed)
+        out = self.model.sample(x, generator=generator, on_step=self.on_step)
+        return _to_estimate(out, self.model.max_value, top)
+
+
+SAMPLER_OPTIONS = {"diffusion": ("steps", "eta"), "flow": ("steps", "solver"), "normalizing_flow": ()}
 
 
 def load_reconstructor(checkpoint: Path, device: str | torch.device | None = None, **kwargs) -> _CheckpointReconstructor:
@@ -196,6 +224,8 @@ def load_reconstructor(checkpoint: Path, device: str | torch.device | None = Non
         return DiffusionReconstructor(checkpoint, device, **kwargs)
     if kind == "flow":
         return FlowReconstructor(checkpoint, device, **kwargs)
+    if kind == "normalizing_flow":
+        return NormalizingFlowReconstructor(checkpoint, device, **kwargs)
     return ModelReconstructor(checkpoint, device, **kwargs)
 
 

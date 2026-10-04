@@ -31,8 +31,8 @@ research questions and milestones.
 | Conditional diffusion on the residual, p(R \| B7) | ✅ done: [results](#diffusion-results-kodak) |
 | Perceptual evaluation (DISTS, patch KID, plots, web UI) | ✅ done |
 | Conditional flow matching on the residual | ✅ done: [results](#flow-matching-results-kodak) |
-| Normalizing flow | ⏳ |
-| Multi-MSB experiments, entropy coding, final codec | ⏳ |
+| Conditional normalizing flow | ✅ k=1 and patch-size ablation complete; not competitive as decoder: [results](#normalizing-flow-results-kodak) |
+| Multi-MSB experiments, entropy coding, final codec | ⏳; next: k=3 comparison |
 
 ### Bit-plane explorer
 
@@ -453,6 +453,57 @@ diffusion), DISTS-optimal is 5. Plots: `python -m msbgen.cli.plot_steps`
 (`steps_kodak-k1_curves.png`: PSNR, DISTS, KID and diversity against steps;
 `steps_kodak-k1_tradeoff.png`: PSNR against DISTS, step counts joined in order).
 
+### Conditional normalizing flow
+
+Milestone 5 adds a Glow-style model for the dequantized residual $R=I-128B_7$.
+Four FrEIA coupling blocks at each of four squeeze scales receive features from a
+learned, multi-resolution B7 encoder. The model uses 128×128 patches because the
+invertible blocks have fixed spatial dimensions; patches are sampled independently.
+Its dequantized continuous likelihood estimates residual coding cost, but does not
+replace discrete entropy coding or establish actual lossless bpp.
+
+Install FrEIA in the HPC environment, then train, evaluate against the existing
+k=1 models, and generate plots:
+
+```shell
+python -m pip install 'FrEIA>=0.2'
+pytest -q tests/test_normalizing_flow.py
+python -m msbgen.cli.train --preset normalizing-flow --name normalizing-flow \
+  --k 1 --steps 40000 --batch-size 16 --crop 128 --crop-size 128 \
+  --scales 4 --blocks-per-scale 4 --condition-width 32 --hidden-width 64 \
+  --device cuda --no-thermal-guard
+python -m msbgen.cli.plot_runs runs/normalizing-flow --out outputs/plots/normalizing-flow
+python -m msbgen.cli.evaluate data/processed/kodak \
+  --models runs/cnn/best.pt runs/unet/best.pt runs/unet-res/best.pt \
+  runs/diffusion/best.pt runs/flow/best.pt runs/normalizing-flow/best.pt \
+  --lpips --dists --kid --samples 8 --sample-steps 3 \
+  --out outputs/eval/kodak-normalizing-flow
+python -m msbgen.cli.plot_eval outputs/eval/kodak-normalizing-flow \
+  --pair normalizing-flow unet-res --out outputs/plots/normalizing-flow
+```
+
+The evaluation uses one draw per deterministic regressor and eight seeded draws
+per generative model. For review, copy `runs/normalizing-flow/config.json` and
+`log.jsonl`, `outputs/eval/kodak-normalizing-flow/summary.json` and
+`per_image.csv`, and the generated PNGs under `outputs/plots/normalizing-flow/`.
+
+### Normalizing-flow results (Kodak)
+
+The k=1 Glow-style model completed 40k steps on DIV2K. It models dequantized residuals in 128×128 patches. Best validation NLL was 4.2647 bits per residual dimension; validation PSNR at step 40k was 16.21 dB, below midpoint fill (17.38 dB on the same validation crops).
+
+| Method | PSNR ↑ | SSIM ↑ | LPIPS ↓ | DISTS ↓ | KID × 10³ ↓ |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Midpoint fill | 17.01 | 0.579 | 0.517 | 0.364 | 81.8 |
+| Residual U-Net | 18.60 | 0.637 | 0.455 | 0.293 | 79.8 |
+| Diffusion, 3 steps | 17.75 | 0.610 | 0.424 | 0.257 | 54.6 |
+| Flow matching, 3 steps | 18.11 | 0.615 | 0.419 | 0.252 | 54.9 |
+| Normalizing flow, one sample | 15.77 | 0.410 | 0.577 | 0.316 | 120.0 |
+| Normalizing flow, 256-pixel patches | 15.85 | 0.423 | 0.568 | 0.320 | 124.9 |
+
+All test metrics use the same 24 Kodak images; stochastic-model KID uses eight samples per image. Averaging eight 128-pixel-patch flow samples raises PSNR to 17.69 dB, but diversity is 23.94 intensity levels versus about 6.1 for diffusion/flow matching. Moving to 256-pixel patches changes single-sample PSNR by only +0.08 dB and sample-mean PSNR by +0.02 dB; SSIM/LPIPS improve slightly, but DISTS/KID worsen slightly. It is about 22% faster per image and shows fewer obvious tile boundaries in the inspected example, but remains behind residual U-Net on PSNR, SSIM, and LPIPS for all 24 images. The outputs retain noisy texture and soft structure.
+
+The dequantized NLL is a continuous-density estimate, not measured lossless bpp. Decision: keep the normalizing flow as a negative k=1 baseline and defer the hybrid. Next, complete the k=3 comparison for CNN, direct U-Net, residual U-Net, diffusion, and flow matching, then compare all k=1/2/3 results. Full findings and HPC commands are in [PLAN.md](PLAN.md).
+
 ## Project structure
 
 ```shell
@@ -467,13 +518,13 @@ MSBGen/
 │   │   ├── metrics.py     # PSNR, SSIM, MAE
 │   │   └── image_io.py    # decode uploads → grayscale/RGB uint8/uint16 arrays, PNG encoding
 │   ├── data/              # Dataset download/preparation + training crops (see data/README.md)
-│   ├── models/            # CNN / U-Net, diffusion, flow matching, checkpoints, reconstructors, metrics (see models/README.md)
-│   ├── training.py        # training loop: regression + diffusion, EMA, validation vs fills, checkpoints, resume
+│   ├── models/            # CNN / U-Net, diffusion, flow matching, normalizing flow, checkpoints and metrics
+│   ├── training.py        # training loop: regression + generative models, validation, checkpoints, resume
 │   ├── utils/             # gpu_guard / cpu_guard / thermal: pause training when too hot
 │   ├── cli/               # Command-line tools (see cli/README.md)
 │   │   ├── analyze.py     # dataset-level analysis → CSV / JSON / plots
 │   │   ├── prepare_data.py  # download + convert DIV2K / Kodak
-│   │   ├── train.py       # train a baseline or a generative model (diffusion, flow)
+│   │   ├── train.py       # train a baseline or generative model
 │   │   ├── plot_runs.py   # training curves + history CSV
 │   │   ├── plot_eval.py   # evaluation plots: metrics, perception vs distortion, paired
 │   │   ├── plot_steps.py  # generative models against their number of sampling steps
