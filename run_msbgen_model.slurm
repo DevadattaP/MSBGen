@@ -49,20 +49,30 @@ echo
 echo "Starting MSBGen model run..."
 date
 
-python -m msbgen.cli.train --preset cnn --name cnn-k3 --k 3 --steps 20000 --device cuda --no-thermal-guard
-python -m msbgen.cli.train --preset unet --name unet-k3 --k 3 --steps 20000 --device cuda --no-thermal-guard
-python -m msbgen.cli.train --preset unet-res --name unet-res-k3 --k 3 --steps 20000 --device cuda --no-thermal-guard
-python -m msbgen.cli.train --preset diffusion --name diffusion-k3 --k 3 --steps 40000 --device cuda --no-thermal-guard
-python -m msbgen.cli.train --preset flow --name flow-k3 --k 3 --steps 40000 --device cuda --no-thermal-guard
-
 python -m msbgen.cli.evaluate data/processed/kodak \
-      --models runs/cnn-k3/best.pt runs/unet-k3/best.pt runs/unet-res-k3/best.pt \
-      runs/diffusion-k3/best.pt runs/flow-k3/best.pt \
-      --lpips --dists --kid --samples 8 --sample-steps 3 \
-      --out outputs/eval/kodak-k3 --no-thermal-guard
+  --k 3 \
+  --models runs/cnn-k3/best.pt runs/unet-k3/best.pt runs/unet-res-k3/best.pt \
+  runs/diffusion-k3/best.pt runs/flow-k3/best.pt \
+  --lpips --dists --kid --samples 8 --sample-steps 3 \
+  --out outputs/eval/kodak-k3-correct --no-thermal-guard
 
-python -m msbgen.cli.plot_eval outputs/eval/kodak-k3 \
-      --pair flow-k3 unet-res-k3 --out outputs/plots/k3
+python -m msbgen.cli.plot_eval outputs/eval/kodak-k3-correct \
+  --pair flow-k3 unet-res-k3 \
+  --out outputs/plots/k3-correct
+
+for s in 1 2 3 5; do
+  python -m msbgen.cli.evaluate data/processed/kodak \
+    --k 3 \
+    --models runs/diffusion-k3/best.pt runs/flow-k3/best.pt \
+    --fills --dists --kid --samples 8 --sample-steps "$s" \
+    --out "outputs/eval/kodak-k3-gen-s$s" --no-thermal-guard
+done
+
+python -m msbgen.cli.plot_steps \
+  outputs/eval/kodak-k3-gen-s* \
+  outputs/eval/kodak-k3-correct \
+  --out outputs/plots/k3-correct
+
 sync
 echo "=== Done: $(date)"
 

@@ -1189,7 +1189,7 @@ $$
 B_7+B_6+B_5.
 $$
 
-### k=2 pilot results (completed; k=3 remains)
+### k=2 pilot results (completed; followed by completed k=3 run)
 
 The Kodak evaluation uses the same 24 images at k=1 and k=2. Mean PSNR (dB) improved across every tested method:
 
@@ -1213,7 +1213,26 @@ PSNR is for one sample; DISTS is lower-is-better, and KID is computed over eight
 
 There is no single best step count across metrics or k. At k=1, one step gives the highest single-sample PSNR, two steps the lowest KID, and five steps the lowest DISTS. At k=2, one step gives the highest single-sample PSNR, two steps the best PSNR of the eight-sample mean (about 26.24-26.25 dB), and three steps the lowest DISTS/KID. Moving from two to three steps costs about 0.23 dB in single-sample PSNR but improves DISTS/KID; beyond three steps those perceptual scores worsen while diversity rises. In this evaluator, k=2 diffusion/flow matching takes about 20, 41, 60, 99, and 960 ms per image at 1, 2, 3, 5, and 50 steps, respectively, versus about 6 ms for residual U-Net. In the inspected Kodak example, k=2 also preserves the broad window layout better than k=1, though fine detail is still smoothed or synthesized. These are pilot results on 24 Kodak images, not evidence of generalization. The raw input cost doubles from 1 to 2 bits/pixel; actual coded bitrate has not yet been measured.
 
-**Next:** resume Milestone 5 and implement/evaluate the conditional normalizing flow at k=1. Then complete Milestone 7 with a controlled k=1/2/3 comparison across models, using the same test set, metrics, sample counts, and model-appropriate sampling settings. Include 1, 2, 3, and 5 steps for diffusion/flow matching; treat three steps as the perceptual reference, not a universal optimum. Report per-image paired results, then measure actual bpp in Milestone 8.
+This pilot led to the completed k=3 comparison below. The normalizing-flow track was evaluated separately and retained as a negative k=1 baseline; it was not extended to k=2 or k=3.
+
+### k=3 results (completed)
+
+The corrected Kodak evaluation uses the same 24 images, k=3, eight samples for each stochastic model, and three generative sampling steps. All five k=3 checkpoints are present and the evaluation metadata is correct.
+
+| Method | PSNR ↑ | SSIM ↑ | LPIPS ↓ | DISTS ↓ | KID × 10³ ↓ | MSB consistency |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Midpoint fill | 28.74 | 0.824 | 0.210 | 0.129 | 24.2 | 1.000 |
+| CNN | 31.10 | 0.891 | 0.143 | 0.094 | 21.5 | 0.991 |
+| U-Net | 30.87 | 0.885 | 0.153 | 0.099 | 23.7 | 0.986 |
+| Residual U-Net | **32.00** | **0.901** | 0.117 | 0.085 | 19.0 | 1.000 |
+| Diffusion, 3 steps | 31.58 | 0.895 | **0.094** | **0.072** | **8.6** | 1.000 |
+| Flow matching, 3 steps | 31.51 | 0.894 | 0.095 | 0.072 | 9.0 | 1.000 |
+
+Adding B5 produces another roughly 6 dB gain over k=2: midpoint rises from 22.63 to 28.74 dB, residual U-Net from 26.14 to 32.00 dB, diffusion from 25.63 to 31.58 dB, and flow matching from 25.60 to 31.51 dB. At k=3 the generative models nearly match the residual U-Net in PSNR, while their DISTS and KID are substantially better. Their eight-sample mean reaches 32.37 dB for diffusion and 32.34 dB for flow matching, above the residual U-Net, with diversity only 2.35-2.42 intensity levels. Direct CNN/U-Net still violate the transmitted planes slightly; residual and generative models remain exact.
+
+The k=3 step sweep confirms the same perception-distortion pattern as k=1 and k=2: one step gives the highest PSNR and lowest latency, while three-to-five steps are the perceptual operating region. At three steps, diffusion is marginally ahead of flow matching (31.58 vs 31.51 dB, DISTS 0.0717 vs 0.0719, KID 8.6 vs 9.0 × 10^-3); the difference is small relative to the 24-image benchmark. No additional k=3 architecture training is justified.
+
+Raw input cost is now 1, 2, or 3 bits/pixel before entropy coding. The reconstruction experiments show a strong rate-quality curve, but they do not establish the actual compressed rate. **Next:** begin Milestone 8: measure per-plane entropy/context entropy, implement lossless coding for the transmitted planes, and report actual bpp alongside PSNR, DISTS, KID, and decoding time. Defer the NF and hybrid tracks unless the compression study creates a likelihood-specific question.
 
 ---
 

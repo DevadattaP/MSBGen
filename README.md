@@ -32,7 +32,8 @@ research questions and milestones.
 | Perceptual evaluation (DISTS, patch KID, plots, web UI) | ✅ done |
 | Conditional flow matching on the residual | ✅ done: [results](#flow-matching-results-kodak) |
 | Conditional normalizing flow | ✅ k=1 and patch-size ablation complete; not competitive as decoder: [results](#normalizing-flow-results-kodak) |
-| Multi-MSB experiments, entropy coding, final codec | ⏳; next: k=3 comparison |
+| Multi-MSB experiments | ✅ k=1/2/3 model comparison complete |
+| Entropy coding and final codec | ⏳; next milestone |
 
 ### Bit-plane explorer
 
@@ -503,6 +504,20 @@ The k=1 Glow-style model completed 40k steps on DIV2K. It models dequantized res
 All test metrics use the same 24 Kodak images; stochastic-model KID uses eight samples per image. Averaging eight 128-pixel-patch flow samples raises PSNR to 17.69 dB, but diversity is 23.94 intensity levels versus about 6.1 for diffusion/flow matching. Moving to 256-pixel patches changes single-sample PSNR by only +0.08 dB and sample-mean PSNR by +0.02 dB; SSIM/LPIPS improve slightly, but DISTS/KID worsen slightly. It is about 22% faster per image and shows fewer obvious tile boundaries in the inspected example, but remains behind residual U-Net on PSNR, SSIM, and LPIPS for all 24 images. The outputs retain noisy texture and soft structure.
 
 The dequantized NLL is a continuous-density estimate, not measured lossless bpp. Decision: keep the normalizing flow as a negative k=1 baseline and defer the hybrid. Next, complete the k=3 comparison for CNN, direct U-Net, residual U-Net, diffusion, and flow matching, then compare all k=1/2/3 results. Full findings and HPC commands are in [PLAN.md](PLAN.md).
+
+### Multi-MSB results (Kodak)
+
+The corrected k=3 evaluation uses the same 24 images and eight samples for each stochastic model. The best residual U-Net gives the highest PSNR, while diffusion and flow matching give the best perceptual scores:
+
+| k | Midpoint PSNR | Residual U-Net PSNR | Diffusion PSNR / DISTS / KID | Flow PSNR / DISTS / KID |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 17.01 | 18.60 | 17.75 / 0.257 / 54.6 | 18.11 / 0.252 / 54.9 |
+| 2 | 22.63 | 26.14 | 25.63 / 0.129 / 26.1 | 25.60 / 0.130 / 25.3 |
+| 3 | 28.74 | **32.00** | 31.58 / **0.072** / **8.6** | 31.51 / 0.072 / 9.0 |
+
+At k=3, eight-sample mean PSNR is 32.37 dB for diffusion and 32.34 dB for flow matching, above the residual U-Net, with diversity around 2.4 intensity levels. Each extra transmitted plane adds roughly 6 dB for the midpoint baseline and about 5.9-7.9 dB for the learned/generative models. These are 24-image Kodak results; actual coded bpp is still unmeasured.
+
+The k=3 step sweep again places one step at the fidelity/latency point and three-to-five steps in the perceptual operating region. No further k=3 model training is planned. The next milestone is entropy coding and actual rate-quality measurement at k=1, 2, and 3.
 
 ## Project structure
 
