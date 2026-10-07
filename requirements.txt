@@ -5,6 +5,7 @@ python-multipart>=0.0.9
 
 # Image processing
 numpy>=1.26
+h5py>=3.10             # convert the paper authors' Keras .hdf5 checkpoints
 pillow>=10.0
 opencv-python>=4.8   # 16-bit colour PNG/TIFF decoding, fast SSIM
 

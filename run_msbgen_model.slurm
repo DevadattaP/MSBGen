@@ -4,7 +4,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --time=03:00:00
+#SBATCH --time=12:00:00
 #SBATCH --output=%x_%j.out
 #SBATCH --error=%x_%j.err
 
@@ -49,29 +49,65 @@ echo
 echo "Starting MSBGen model run..."
 date
 
-python -m msbgen.cli.evaluate data/processed/kodak \
-  --k 3 \
-  --models runs/cnn-k3/best.pt runs/unet-k3/best.pt runs/unet-res-k3/best.pt \
-  runs/diffusion-k3/best.pt runs/flow-k3/best.pt \
-  --lpips --dists --kid --samples 8 --sample-steps 3 \
-  --out outputs/eval/kodak-k3-correct --no-thermal-guard
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
 
-python -m msbgen.cli.plot_eval outputs/eval/kodak-k3-correct \
-  --pair flow-k3 unet-res-k3 \
-  --out outputs/plots/k3-correct
+WORKERS=$((SLURM_CPUS_PER_TASK - 2))
+echo "Using $WORKERS DataLoader workers"
 
-for s in 1 2 3 5; do
-  python -m msbgen.cli.evaluate data/processed/kodak \
-    --k 3 \
-    --models runs/diffusion-k3/best.pt runs/flow-k3/best.pt \
-    --fills --dists --kid --samples 8 --sample-steps "$s" \
-    --out "outputs/eval/kodak-k3-gen-s$s" --no-thermal-guard
+for bits in 1 2 3 4 5 6 7; do
+  python -m msbgen.cli.bitdepth train \
+    --input-bits "$bits" \
+    --train data/processed/div2k-train \
+    --val data/processed/div2k-valid \
+    --out runs/bitdepth-d4 \
+    --bit-depth 8 \
+    --depth 4 \
+    --epochs 30 \
+    --batch-size 128 \
+    --patch-size 48 \
+    --lr 1e-3 \
+    --lr-drop-epoch 16 \
+    --workers "$WORKERS" \
+    --device cuda \
+    --augment --no-thermal-guard
 done
 
-python -m msbgen.cli.plot_steps \
-  outputs/eval/kodak-k3-gen-s* \
-  outputs/eval/kodak-k3-correct \
-  --out outputs/plots/k3-correct
+python -m msbgen.cli.bitdepth evaluate \
+  --models runs/bitdepth-d4 \
+  --test data/processed/kodak \
+  --start-bits 1 2 3 \
+  --end-bits 8 \
+  --bit-depth 8 \
+  --device cuda \
+  --save-images \
+  --out outputs/bitdepth/kodak
+
+python -m msbgen.cli.bitdepth plot \
+  outputs/bitdepth/kodak/evaluation.csv \
+  --out outputs/bitdepth/kodak/recovery.png
+
+for k in 1 2 3; do
+  if [ "$k" -eq 1 ]; then
+    suffix=""
+  else
+    suffix="-k${k}"
+  fi
+
+  python -m msbgen.cli.evaluate \
+    data/processed/kodak \
+    --k "$k" \
+    --models \
+      "runs/cnn${suffix}/best.pt" \
+      "runs/unet${suffix}/best.pt" \
+      "runs/unet-res${suffix}/best.pt" \
+      "runs/diffusion${suffix}/best.pt" \
+      "runs/flow${suffix}/best.pt" \
+    --out "outputs/eval/kodak-all-k${k}" \
+    --samples 4 \
+    --save-images 4 \
+    --device cuda --no-thermal-guard
+done
 
 sync
 echo "=== Done: $(date)"

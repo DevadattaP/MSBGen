@@ -1,6 +1,15 @@
 """Neural reconstructors (requires PyTorch). `msbgen.core` never imports this package."""
 
 from msbgen.models.checkpoint import GENERATIVE_KINDS, build_model, load_model, read_checkpoint, save_checkpoint
+from msbgen.models.bitdepth_recovery import (
+    BitplaneDataset,
+    BitplaneResidualCNN,
+    BitplaneTrainConfig,
+    next_bit_target,
+    quantize,
+    recover_bitplanes,
+    train_bitplane,
+)
 from msbgen.models.diffusion import DiffusionConfig, MSBDiffusion
 from msbgen.models.flow import FlowConfig, MSBFlow
 from msbgen.models.msb_net import ModelConfig, MSBNet
@@ -18,6 +27,9 @@ from msbgen.models.reconstructor import (
 
 __all__ = [
     "ARCHITECTURES",
+    "BitplaneDataset",
+    "BitplaneResidualCNN",
+    "BitplaneTrainConfig",
     "DiffusionConfig",
     "DiffusionReconstructor",
     "FlowConfig",
@@ -41,4 +53,8 @@ __all__ = [
     "load_reconstructor",
     "read_checkpoint",
     "save_checkpoint",
+    "next_bit_target",
+    "quantize",
+    "recover_bitplanes",
+    "train_bitplane",
 ]
