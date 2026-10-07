@@ -9,6 +9,7 @@ python -m msbgen.cli.<tool> --help
 | Tool | Purpose |
 | --- | --- |
 | [`analyze`](analyze.py) | Dataset-level bit-plane analysis → CSV, JSON and plots |
+| [`rate`](rate.py) | Lossless adaptive range-coded top-k planes → actual bpp report |
 | [`prepare_data`](prepare_data.py) | Download and convert datasets (DIV2K, Kodak) to grayscale `.npy` |
 | [`train`](train.py) | Train a baseline, diffusion/flow-matching model, or conditional normalizing flow |
 | [`evaluate`](evaluate.py) | Score the fills (zero / mid / random) and trained checkpoints on a test set |
@@ -52,7 +53,36 @@ python -m msbgen.cli.analyze data/kodak --gray --plots
 python -m msbgen.cli.analyze data/div2k -r --no-ssim --limit 100 --out outputs/analysis/div2k_quick
 ```
 
-### Options
+## `rate`: actual top-plane coding rate
+
+`rate` encodes the transmitted top-k planes with an adaptive binary range coder
+using the same four causal neighbours as `context_entropy`, then decodes the
+stream and verifies the top-bit image. It reports the theoretical raw rate, the
+context-entropy estimate, the arithmetic-coded payload rate, and the framed stream
+rate including four-byte per-plane length fields. Image dimensions and k are
+assumed to be known by the surrounding container and are not counted.
+
+```shell
+python -m msbgen.cli.rate data/processed/kodak --gray --ks 1 2 3 \
+  --out outputs/rate/kodak
+```
+
+Outputs are `per_image.csv` and `summary.json`. `roundtrip` must be true for
+every row. The framed bpp is the measured lossless stream rate for this coder;
+it excludes the image/container metadata and any model side information.
+
+### Rate options
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `input` | required | Folder of images |
+| `--ks` | `1 2 3` | Top-plane counts to encode |
+| `--gray` | off | Convert RGB images to grayscale |
+| `-r`, `--recursive` | off | Search subfolders |
+| `--limit N` | all | Process at most N images |
+| `--out DIR` | `outputs/rate/<input folder name>` | Output folder |
+
+### Analyze options
 
 | Option | Default | Meaning |
 | --- | --- | --- |

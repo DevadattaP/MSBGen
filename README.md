@@ -33,7 +33,7 @@ research questions and milestones.
 | Conditional flow matching on the residual | ✅ done: [results](#flow-matching-results-kodak) |
 | Conditional normalizing flow | ✅ k=1 and patch-size ablation complete; not competitive as decoder: [results](#normalizing-flow-results-kodak) |
 | Multi-MSB experiments | ✅ k=1/2/3 model comparison complete |
-| Entropy coding and final codec | ⏳; next milestone |
+| Entropy coding and final codec | ⏳; reference range coder implemented, Kodak rate measurement next |
 
 ### Bit-plane explorer
 
@@ -518,6 +518,29 @@ The corrected k=3 evaluation uses the same 24 images and eight samples for each 
 At k=3, eight-sample mean PSNR is 32.37 dB for diffusion and 32.34 dB for flow matching, above the residual U-Net, with diversity around 2.4 intensity levels. Each extra transmitted plane adds roughly 6 dB for the midpoint baseline and about 5.9-7.9 dB for the learned/generative models. These are 24-image Kodak results; actual coded bpp is still unmeasured.
 
 The k=3 step sweep again places one step at the fidelity/latency point and three-to-five steps in the perceptual operating region. No further k=3 model training is planned. The next milestone is entropy coding and actual rate-quality measurement at k=1, 2, and 3.
+
+The first Milestone 8 reference coder is available as:
+
+```shell
+python -m msbgen.cli.rate data/processed/kodak --gray --ks 1 2 3 \
+  --out outputs/rate/kodak
+```
+
+It adaptively range-codes each top plane, verifies lossless decoding, and reports
+raw, context-estimated, arithmetic payload, and framed stream bpp.
+
+The first Kodak measurement is complete. All 24 images round-tripped losslessly:
+
+| k | Raw bpp | Context estimate | Framed stream bpp |
+| ---: | ---: | ---: | ---: |
+| 1 | 1.000 | 0.165 | **0.165** |
+| 2 | 2.000 | 0.500 | **0.501** |
+| 3 | 3.000 | 1.020 | **1.021** |
+
+These are actual rates for the reference coder, excluding image/container
+metadata. At those rates, the reconstruction points are 18.60 dB for residual
+U-Net at k=1, 26.14 dB at k=2, and 32.00 dB at k=3; diffusion gives the strongest
+perceptual scores at k=3 (31.58 dB, DISTS 0.072, KID 8.6 × 10^-3).
 
 ## Project structure
 

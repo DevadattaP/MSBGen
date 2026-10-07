@@ -1238,6 +1238,62 @@ Raw input cost is now 1, 2, or 3 bits/pixel before entropy coding. The reconstru
 
 ## Milestone 8 — Actual compression
 
+**Status:** reference coder and Kodak rate measurement complete; production codec refinements remain.
+
+The reference implementation encodes each transmitted top-k plane with an
+adaptive binary range coder using the four causal neighbours already used by
+`context_entropy`. It resets the adaptive model for each plane, stores a
+four-byte length prefix per plane, decodes the stream, and verifies exact
+recovery of the transmitted top-k image. Report both arithmetic payload bpp and
+framed stream bpp; neither includes image/container metadata or model side
+information.
+
+Run it on Kodak for the three operating points:
+
+```shell
+python -m msbgen.cli.rate data/processed/kodak --gray --ks 1 2 3 \
+      --out outputs/rate/kodak
+```
+
+### Kodak rate results
+
+The reference coder successfully round-tripped all 24 prepared Kodak images at
+each k. The measured framed stream rates are:
+
+| k | Raw rate | Context estimate | Arithmetic payload | Framed stream | Added rate |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 1.000 bpp | 0.165 bpp | 0.165 bpp | **0.165 bpp** | 0.165 bpp |
+| 2 | 2.000 bpp | 0.500 bpp | 0.501 bpp | **0.501 bpp** | 0.336 bpp |
+| 3 | 3.000 bpp | 1.020 bpp | 1.021 bpp | **1.021 bpp** | 0.520 bpp |
+
+`roundtrip` was true for every image and k. The arithmetic payload is within
+0.001 bpp of the context-entropy estimate, so the reference coder is behaving as
+expected. Length-prefix overhead is negligible at Kodak image sizes. The large
+gap between raw and coded rates comes from the spatial structure of the MSB
+planes, especially B7; B5 is substantially less compressible than B6 in this
+independent-plane coder.
+
+Combining these rates with the reconstruction results gives the current rate-
+quality picture:
+
+| k / framed bpp | Midpoint PSNR | Residual U-Net PSNR | Diffusion, 3 steps | Flow matching, 3 steps |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 / 0.165 | 17.01 dB | 18.60 dB | 17.75 dB, DISTS 0.257 | 18.11 dB, DISTS 0.252 |
+| 2 / 0.501 | 22.63 dB | 26.14 dB | 25.63 dB, DISTS 0.129 | 25.60 dB, DISTS 0.130 |
+| 3 / 1.021 | 28.74 dB | **32.00 dB** | 31.58 dB, **DISTS 0.072** | 31.51 dB, DISTS 0.072 |
+
+For a distortion-first decoder, residual U-Net is the current choice. For a
+perceptual decoder, diffusion or flow matching is preferable, with diffusion
+slightly ahead at k=3 and three steps. The transmitted rate is independent of
+which decoder is selected because all models receive the same top-k planes.
+
+Then combine `outputs/rate/kodak/summary.json` with the existing k=1/2/3
+evaluation summaries. The rate-quality table should contain actual framed bpp,
+PSNR, DISTS, KID, decoding time, and the raw k-bit/pixel reference. Treat the
+reference coder as a correctness baseline, not a production codec: later work
+can reduce overhead, condition lower planes on already coded higher planes, and
+use a stronger context model.
+
 Add:
 
 $$

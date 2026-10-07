@@ -117,8 +117,18 @@ How to read it:
   very small images. With 16 contexts that doesn't matter for normal image sizes.
 
 So `coded_bpp` is an *estimate* of what transmitting the top k planes would cost,
-not a real code length. It is enough to compare planes and images; Milestone 8
-(actual compression) will replace it with real coders.
+not a real code length. It is enough to compare planes and images; the actual
+lossless stream is measured by `msbgen.cli.rate` in Milestone 8.
+
+### Actual lossless top-plane coding
+
+`encode_top_planes(image, k)` uses an adaptive binary range coder with the same
+four causal neighbours as `context_entropy`. `decode_top_planes` reverses it and
+the rate CLI verifies that decoding reproduces the top-k image exactly. The stream
+has a four-byte length prefix per plane, so the report distinguishes arithmetic
+payload bpp from framed stream bpp. This is a simple reference coder, not yet a
+production entropy coder: its adaptive model resets for each plane and its
+metadata/container overhead is reported separately.
 
 ### Spatial correlation: `spatial_correlation(plane)`
 

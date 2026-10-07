@@ -27,6 +27,7 @@ from msbgen.core.image_io import (
     to_preview,
 )
 from msbgen.core.metrics import image_patches, kid, mae, mse, psnr, ssim
+from msbgen.core.entropy import decode_top_planes, encode_top_planes
 from msbgen.core.reconstruction import (
     FILL_RECONSTRUCTORS,
     MidpointFill,
@@ -62,8 +63,10 @@ __all__ = [
     "binary_entropy",
     "combine_channel_planes",
     "context_entropy",
+    "decode_top_planes",
     "encode_png",
     "encode_rgb_bits_png",
+    "encode_top_planes",
     "image_patches",
     "infer_bit_depth",
     "kid",
