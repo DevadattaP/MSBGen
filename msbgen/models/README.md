@@ -5,9 +5,13 @@ Neural reconstructors, i.e. the trained counterparts of the fills in
 This package needs PyTorch. `msbgen.core` never imports it, so the web app and the
 analysis tools still work without torch installed.
 
+For model architectures, input/output paths, targets, losses, training, and inference,
+see the [model guide](MODEL_GUIDE.md).
+
 | Module | What it does |
 | --- | --- |
 | [`nets.py`](nets.py) | Backbones: `SimpleCNN`, `UNet` and the time-conditioned `TimeUNet` |
+| [`bitdepth_recovery.py`](bitdepth_recovery.py) | Paper-style one-plane CNN, patch dataset, trainer, and sequential recovery |
 | [`msb_net.py`](msb_net.py) | `MSBNet`: backbone + input encoding + output mode; `ModelConfig` (regression) |
 | [`generative.py`](generative.py) | `ResidualGenerator`: what the generative models share (residual scaling, $B_7$ conditioning, `TimeUNet`) |
 | [`diffusion.py`](diffusion.py) | `MSBDiffusion`: conditional diffusion on the residual, p(R \| B7); `DiffusionConfig` |

@@ -1,179 +1,51 @@
-# Bit-Depth Recovery : Initial report
+# Bit-Depth Recovery and MSBGen: Short Report
 
-## 1. Scope
+## Previous Work
 
-This report records two related experiments:
+The reference method, [A Little Bit More: Bitplane-Wise Bit-Depth Recovery](https://arxiv.org/abs/2005.01091), with the official implementation at [GitHub](https://github.com/abhijithpunnappurath/a-little-bit-more), predicts missing lower bitplanes sequentially: reconstruct one plane, add it to the image, then predict the next. We ported its residual-CNN approach to PyTorch and converted the authors' released D4/D16 RGB checkpoints from Keras to evaluate them on Kodak.
 
-1. A reproduction of **A Little Bit More: Bitplane-Wise Bit-Depth Recovery** by Punnappurath and Brown, using the authors' released TensorFlow/Keras checkpoints converted to PyTorch.
-2. The MSBGen grayscale experiments, which study reconstruction from only the most significant bitplanes using deterministic regressors and stochastic generative models.
+MSBGen studies a related but harder task: reconstructing a complete grayscale image from only its top `k` bits (`k=1,2,3`). It compares direct CNN/U-Net regressors and conditional diffusion/flow models. The paper-style sequential model and the MSBGen full-image models are distinct experiments.
 
-The paper and the MSBGen project address different operating points. The paper reconstructs an image after keeping several **top bitplanes** and predicts the remaining lower planes. MSBGen additionally studies the much more ambiguous one-plane case, especially reconstruction from only `B7`.
+## RGB Pretrained Results
 
-## 2. Reference Paper
+Mean over 24 RGB Kodak images. These are evaluations of the authors' pretrained checkpoints, not models retrained here.
 
-The reference is [A Little Bit More: Bitplane-Wise Bit-Depth Recovery](https://arxiv.org/abs/2005.01091), with the official implementation at [a-little-bit-more](https://github.com/abhijithpunnappurath/a-little-bit-more).
+| Input bits -> 8 | D4 PSNR | D16 PSNR | D16 SSIM |
+| --- | ---: | ---: | ---: |
+| 3 -> 8 | 33.13 | 33.48 | 0.9349 |
+| 4 -> 8 | 39.34 | 39.53 | 0.9723 |
+| 5 -> 8 | 44.46 | 44.65 | 0.9880 |
+| 6 -> 8 | 49.21 | 49.29 | 0.9954 |
+| 7 -> 8 | 54.93 | 54.99 | 0.9987 |
 
-Given an `N`-bit image and a `q`-bit quantized input, the method trains one independent CNN for each missing bitplane:
+All cases preserved the transmitted top bits. More input bits had a much larger effect than increasing depth from D4 to D16.
 
-```text
-I_q -> predict B_(N-q-1) -> add its bit value
-    -> predict the next lower bitplane -> ... -> reconstruct I_N
-```
+## Grayscale Kodak Results
 
-Each network receives the currently reconstructed image and predicts one binary RGB plane. Training uses binary cross-entropy. At inference, the predicted plane is weighted by its place value and added before the next network is applied.
+Mean PSNR (dB) over 24 images; each model reconstructs the full 8-bit image from the indicated number of top bits. CNN/U-Net/Res U-Net are deterministic. Diffusion and flow columns are single-sample results.
 
-### Published network and training setup
+| Method | k=1 | k=2 | k=3 |
+| --- | ---: | ---: | ---: |
+| Midpoint fill | 17.01 | 22.63 | 28.74 |
+| CNN | 18.04 | 25.13 | 31.10 |
+| U-Net | 18.55 | 25.90 | 30.87 |
+| Residual U-Net | **18.60** | **26.14** | 32.00 |
+| Sequential bitplane CNN (D4) | 18.56 | 25.65 | **32.04** |
+| Diffusion | 17.75 | 25.63 | 31.58 |
+| Flow matching | 18.11 | 25.60 | 31.51 |
 
-- RGB input and RGB output
-- 64 convolution filters throughout
-- 3x3 convolutions with same padding
-- D4 or D16 residual-block depth
-- Residual block: BatchNorm, convolution, BatchNorm, ReLU, convolution, skip addition
-- Final BatchNorm, convolution, and sigmoid
-- Independent model for each missing bitplane
-- 48x48 non-overlapping training patches
-- Random flips and 90-degree rotations
-- Adam, learning rate `1e-3`, batch size `128`
-- 30 epochs
-- Learning rate divided by 5 after epoch 16
-- Training data: 1,000 Sintel images plus 1,000 MIT-Adobe FiveK images
+With four generated samples, diffusion/flow PSNR of the sample mean was 18.12/18.47 dB at k=1, 26.16/26.16 at k=2, and 32.24/32.22 at k=3. Residual U-Net is strongest or competitive on single-sample distortion; the generative sample means become competitive as more bits are given. The sequential bitplane CNN is close to the best regressors and reaches the highest single-result PSNR at k=3.
 
-The paper reports PSNR and SSIM over Sintel, MIT-Adobe FiveK, TESTIMAGES, Kodak, and ESPL v2.
+## Why Metrics Are Empty
 
-## 3. PyTorch Reproduction
+- The general evaluator computes LPIPS and DISTS only when run with `--lpips --dists` (requiring the `lpips` and `piq` packages). The `kodak-all-k1/2/3` summaries have both set to `null`, so those metrics were not measured in these runs. KID is also opt-in via `--kid`.
+- PSNR avg and diversity need multiple stochastic samples; they are intentionally blank for deterministic models. Here they are present for stochastic methods because the run used four samples.
+- The bitplane CLI writes only PSNR, SSIM, and MAE to `outputs/bitdepth/kodak/evaluation.csv`; it does not currently calculate LPIPS, DISTS, KID, or MSB consistency.
 
-The original implementation is in TensorFlow/Keras. The authors released pretrained checkpoints for 4->8 through 16->8 RGB recovery. The checkpoints are in HDF5 format and contain Conv2D kernels, BatchNorm parameters, and optimizer state.
+## Gaps and Next Steps
 
-I have ported this to PyTorch. It provides:
-
-- the paper-style residual CNN;
-- quantization and binary-plane target generation;
-- 48x48 patch datasets;
-- BCE-with-logits training;
-- sequential bitplane recovery;
-- GPU training with configurable DataLoader workers and thermal protection.
-
-To start with I created evaluation wrapper around existing pretrained models. It:
-
-1. Reads the authors' `model_030.hdf5` checkpoints.
-2. Converts Keras Conv2D kernels from `H x W x Cin x Cout` to PyTorch `Cout x Cin x H x W`.
-3. Converts Keras BatchNorm gamma, beta, moving mean, and moving variance.
-4. Saves converted PyTorch checkpoints beside the HDF5 files.
-5. Runs RGB Kodak evaluation.
-6. Writes per-image metrics, aggregate JSON, reconstructed images, and a plot.
-
-The released checkpoints contain `bitpos_04` through `bitpos_16`. For 8-bit Kodak evaluation, the available published models support 3->8 and higher input depths. The experiments below use 3->8, 4->8, 5->8, 6->8, and 7->8.
-
-The evaluation used all 24 RGB Kodak images. Metrics are computed against the original 8-bit RGB images. `MSB consistency` measures whether rounding the estimate preserves the transmitted top bits.
-
-## 4. Pretrained RGB Kodak Results
-
-Values are means over 24 images. Lower MAE is better. D4 and D16 are the number of residual blocks in each independent plane model.
-
-| Model | Recovery | PSNR (dB) | SSIM | MAE | MSB consistency |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| D4 | 3->8 | 33.126 | 0.93289 | 4.216 | 1.0000 |
-| D16 | 3->8 | **33.476** | **0.93490** | **4.024** | 1.0000 |
-| D4 | 4->8 | 39.337 | 0.9710 | 2.097 | 1.0000 |
-| D16 | 4->8 | **39.529** | **0.9723** | **2.044** | 1.0000 |
-| D4 | 5->8 | 44.457 | 0.98755 | 1.179 | 1.0000 |
-| D16 | 5->8 | **44.651** | **0.98802** | **1.151** | 1.0000 |
-| D4 | 6->8 | 49.213 | 0.99534 | 0.709 | 1.0000 |
-| D16 | 6->8 | **49.291** | **0.99545** | **0.699** | 1.0000 |
-| D4 | 7->8 | 54.927 | 0.99865 | 0.400 | 1.0000 |
-| D16 | 7->8 | **54.989** | **0.99867** | **0.393** | 1.0000 |
-
-The D16 improvement over D4 is small on Kodak, approximately `0.06-0.19 dB` depending on the input depth. The largest effect comes from transmitting more bitplanes: moving from 5->8 to 7->8 improves PSNR by approximately 10.3 dB for both model depths.
-
-## 5. Simple MSBGen Grayscale Experiments
-
-The simple MSBGen experiments use 8-bit grayscale Kodak images and compare:
-
-- zero fill;
-- midpoint fill;
-- random fill;
-- direct CNN regression;
-- direct U-Net regression;
-- residual U-Net regression;
-- conditional diffusion;
-- conditional flow matching;
-- conditional normalizing flow.
-
-The grayscale deterministic and generative models are trained on DIV2K grayscale crops and evaluated on the 24-image grayscale Kodak set. The generative models predict a distribution of missing residual values rather than a single deterministic estimate.
-
-### 5.1 One transmitted plane: grayscale `k=1`
-
-The input is only `B7`; seven lower bits are missing.
-
-| Method | PSNR (dB) | SSIM | MAE | DISTS | MSB consistency |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Zero fill | 10.369 | 0.2381 | 69.104 | 0.3710 | 1.0000 |
-| Midpoint fill | 17.007 | 0.5793 | 31.764 | 0.3635 | 1.0000 |
-| Random fill | 13.816 | 0.1289 | 42.684 | 0.3852 | 1.0000 |
-| CNN | 18.039 | 0.6167 | 27.321 | 0.2809 | 0.9995 |
-| U-Net | 18.553 | 0.6371 | 25.474 | 0.2966 | 0.9986 |
-| Residual U-Net | **18.599** | **0.6373** | **25.339** | 0.2931 | 1.0000 |
-| Diffusion | 16.326 | 0.4801 | 32.192 | **0.2689** | 1.0000 |
-| Flow matching | 16.451 | 0.4986 | 31.364 | **0.2638** | 1.0000 |
-| Normalizing flow | 15.765 | 0.4096 | 33.612 | 0.3163 | 1.0000 |
-
-For stochastic models, the sample mean is more informative for distortion metrics. With eight diffusion samples, the mean PSNR was `17.853 dB`; with eight flow samples it was `18.148 dB`.
-
-The one-plane result demonstrates the core MSBGen problem: many grayscale images are compatible with the same MSB plane. Deterministic models maximize average fidelity and therefore produce smooth reconstructions, while generative models can produce plausible variation but may score lower on single-sample PSNR.
-
-### 5.2 Two transmitted planes: grayscale `k=2`
-
-The input contains `B7` and `B6`; six lower bits are missing.
-
-| Method | PSNR (dB) | SSIM | MAE | DISTS | MSB consistency |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Midpoint fill | 22.630 | 0.7033 | 16.462 | 0.2154 | 1.0000 |
-| CNN | 25.132 | 0.7846 | 11.546 | 0.1612 | 0.9970 |
-| U-Net | 25.903 | 0.7983 | 10.315 | 0.1587 | 0.9935 |
-| Residual U-Net | **26.141** | **0.8044** | **10.099** | 0.1554 | 1.0000 |
-| Diffusion | 25.627 | 0.7885 | 10.540 | **0.1292** | 1.0000 |
-| Flow matching | 25.602 | 0.7902 | 10.592 | 0.1302 | 1.0000 |
-
-The generative models have lower DISTS than the deterministic regressors, while the residual U-Net remains strongest on single-sample PSNR and SSIM. The eight-sample PSNR averages are approximately `26.237 dB` for diffusion and `26.233 dB` for flow matching.
-
-### 5.3 Three transmitted planes: grayscale `k=3`
-
-The input contains `B7`, `B6`, and `B5`; five lower bits are missing.
-
-| Method | PSNR (dB) | SSIM | MAE | DISTS | MSB consistency |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Midpoint fill | 28.740 | 0.8237 | 8.126 | 0.1286 | 1.0000 |
-| CNN | 31.104 | 0.8915 | 5.784 | 0.0940 | 0.9914 |
-| U-Net | 30.872 | 0.8849 | 5.810 | 0.0992 | 0.9857 |
-| Residual U-Net | **31.998** | **0.9015** | **5.099** | 0.0852 | 1.0000 |
-| Diffusion | 31.578 | 0.8951 | 5.238 | **0.0717** | 1.0000 |
-| Flow matching | 31.513 | 0.8944 | 5.278 | 0.0719 | 1.0000 |
-
-At `k=3`, the conditional generative models become competitive with deterministic regression on PSNR and SSIM while achieving substantially better DISTS. The eight-sample PSNR averages are `32.366 dB` for diffusion and `32.342 dB` for flow matching.
-
-## 6. Grayscale Bitplane-Wise Training Status
-
-I also implemented a grayscale PyTorch version of the paper's independent bitplane training procedure. The execution is in progress.
-
-This experiment is separate from the authors' RGB pretrained checkpoints. It uses the local DIV2K grayscale preparation and trains one model for each input depth. For an 8-bit target, the planned models are:
-
-```text
-input_bits=1 -> predicts the next missing plane
-input_bits=2 -> predicts the next missing plane
-...
-input_bits=7 -> predicts B0
-```
-
-## 7. Main Findings
-
-1. The published RGB bitplane-wise method performs very strongly when five to seven top bits are already available. On Kodak, D16 reaches `54.989 dB` for 7->8 recovery.
-2. D16 is consistently, but only slightly, better than D4 on Kodak. The number of transmitted bitplanes has a much larger effect than increasing residual depth.
-3. For grayscale MSB-only reconstruction, deterministic residual U-Net gives the best single-sample PSNR and perfect transmitted-bit consistency.
-4. Diffusion and flow matching are not expected to win single-sample PSNR in a one-to-many problem. Their strongest evidence is lower DISTS, nonzero sample diversity, and improving PSNR of the sample mean.
-5. As more MSB planes are transmitted, the generative models become more competitive in both distortion and perceptual metrics.
-
-## 8. Next Steps
-
-1. Complete the grayscale bitplane-wise training and evaluation.
-2. Study the effect of residual depth on grayscale bitplane-wise recovery vs MSB-only recovery.
-3. Design conditional generative model using diffusion and flow matching for bitplane-wise recovery.
+- The pretrained RGB benchmark uses released weights on Kodak; it is not a full reproduction of the paper's training data or protocol. The grayscale experiments use DIV2K and should not be presented as directly comparable RGB results.
+- CNN/U-Net grayscale regressors do not always preserve the transmitted bits exactly (MSB consistency is below 1); residual U-Net and the generative methods reported 1.0.
+- Re-run grayscale evaluation with LPIPS/DISTS (and KID if useful); add corresponding optional metrics to the bitplane evaluator for a fairer comparison.
+- Locate or restore the sequential model checkpoints and training histories; they are not currently alongside the evaluation CSV/images. Then repeat across seeds and report uncertainty. Test a hard MSB-consistency projection for direct regressors.
+- Complete controlled comparisons of sequential bitplane recovery against full-image reconstruction, keeping RGB pretrained and grayscale trained results clearly separated.
