@@ -23,15 +23,17 @@ from torch import nn
 
 from msbgen.models.diffusion import DiffusionConfig, MSBDiffusion
 from msbgen.models.flow import FlowConfig, MSBFlow
+from msbgen.models.hybrid import HybridConfig, MSBHybrid
 from msbgen.models.msb_net import ModelConfig, MSBNet
 from msbgen.models.normalizing_flow import MSBNormalizingFlow, NormalizingFlowConfig
 
 FORMAT = "msbgen-checkpoint-v1"
 KINDS = {"regression": (ModelConfig, MSBNet), "diffusion": (DiffusionConfig, MSBDiffusion),
-         "flow": (FlowConfig, MSBFlow), "normalizing_flow": (NormalizingFlowConfig, MSBNormalizingFlow)}
-GENERATIVE_KINDS = ("diffusion", "flow", "normalizing_flow")
-ModelConfigs = ModelConfig | DiffusionConfig | FlowConfig | NormalizingFlowConfig
-Models = MSBNet | MSBDiffusion | MSBFlow | MSBNormalizingFlow
+         "flow": (FlowConfig, MSBFlow), "normalizing_flow": (NormalizingFlowConfig, MSBNormalizingFlow),
+         "hybrid": (HybridConfig, MSBHybrid)}
+GENERATIVE_KINDS = ("diffusion", "flow", "normalizing_flow", "hybrid")
+ModelConfigs = ModelConfig | DiffusionConfig | FlowConfig | NormalizingFlowConfig | HybridConfig
+Models = MSBNet | MSBDiffusion | MSBFlow | MSBNormalizingFlow | MSBHybrid
 
 
 def build_model(config: ModelConfigs) -> Models:

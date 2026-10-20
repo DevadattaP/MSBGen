@@ -84,6 +84,8 @@ class TrainConfig:
     log_every: int = 100
     ema: float = 0.0  # EMA decay of the weights (0 = off); e.g. 0.999 for the generative models
     val_sample_steps: int | None = None  # generative models: validation sampling steps (None: the model's)
+    init_unet: str | None = None  # hybrid: residual U-Net checkpoint that initialises stage 1
+    freeze_unet: bool = False  # hybrid: keep stage 1 fixed (needs init_unet to be useful)
     workers: int = 4
     seed: int = 0
     device: str = "auto"
@@ -221,9 +223,13 @@ def train(cfg: TrainConfig, resume: Path | None = None) -> Path:
     (run_dir / "config.json").write_text(json.dumps(cfg.to_dict(), indent=2))
 
     model = build_model(cfg.model).to(device)
+    if cfg.init_unet:
+        model.load_unet(Path(cfg.init_unet))
+    if cfg.freeze_unet:
+        model.unet.requires_grad_(False)
     ema = copy.deepcopy(model).requires_grad_(False) if cfg.ema > 0 else None
     eval_model = ema if ema is not None else model  # validated, and saved as the inference weights
-    optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr)
+    optimizer = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=cfg.lr)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, _lr_lambda(cfg))
     generative = model.kind in GENERATIVE_KINDS
     # best.pt criterion: highest validation PSNR (regression) or lowest validation loss (generative)

@@ -99,7 +99,7 @@ def summary_method_kind(name: str, entry: dict) -> str:
     (generative checkpoints record `model_kind`; older summaries use `sample_steps`)."""
     if name in FILL_RECONSTRUCTORS:
         return "fill"
-    return "generative" if entry.get("model_kind") in ("diffusion", "flow", "normalizing_flow") \
+    return "generative" if entry.get("model_kind") in ("diffusion", "flow", "normalizing_flow", "hybrid") \
         or "sample_steps" in entry else "regression"
 
 

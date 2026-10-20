@@ -1163,13 +1163,20 @@ python -m msbgen.cli.plot_eval outputs/eval/kodak-k3 \
 
 ## Milestone 6 — Hybrid model
 
-**Status:** deferred. The normalizing-flow decoder has not shown a complementary strength that justifies combining it with flow matching or diffusion. Revisit only if the k-sweep or a separate likelihood-focused question gives a concrete hypothesis.
+**Status:** first version complete (k=1/2/3 on Kodak). The NF-based hybrids stay dropped (the NF was a negative result); the hybrid actually built is the plan's section-15 alternative: **residual U-Net -> flow matching (correction `r - r0`) -> truncated diffusion refinement**, trained from a frozen `unet-res` (`--preset hybrid`, `run_msbgen_hybrid.slurm`, `msbgen/models/hybrid.py`).
 
-Only now investigate:
+| k | Hybrid PSNR / DISTS / KID | Best single-sample PSNR to beat | Sequential bitplane CNN (D4) PSNR |
+| ---: | --- | --- | ---: |
+| 1 | 18.22 / 0.2594 / 46.9 | 18.60 (residual U-Net) | 18.56 |
+| 2 | 25.99 / 0.1249 / 17.3 | 26.14 (residual U-Net) | 25.65 |
+| 3 | 31.65 / 0.0681 / 5.9 | 32.00 (residual U-Net) | **32.04** |
 
-$$
-NF + FM + Diffusion.
-$$
+Outcome: best perceptual scores at k=2/3 (DISTS, KID, LPIPS) and best 8-sample-mean PSNR, but single-sample PSNR is still below the residual U-Net, and at k=3 below the sequential bitplane CNN. The shared evaluator now reports LPIPS, DISTS, KID and MSB consistency for D4 as well: at k=3, D4 has 32.04 dB PSNR while the hybrid has lower LPIPS (0.0905 vs. 0.1425), DISTS (0.0681 vs. 0.0943) and KID (5.93 vs. 21.15). The stage ablation shows refinement trades about 0.04 dB at k=3 for better DISTS/KID.
+
+**Next experiments (goal: beat the sequential bitplane CNN on distortion):**
+
+1. Try training the U-Net jointly (omit `--freeze-unet`, `--unet-weight`), a stronger stage-1 (wider/deeper, or the sequential model as stage 1), and tune `refine_t`, `--refine-steps` and flow steps (PSNR vs perceptual trade-off).
+2. Repeat over seeds, report paired uncertainty, and add tiled hybrid inference for large images.
 
 ---
 
@@ -1232,7 +1239,7 @@ Adding B5 produces another roughly 6 dB gain over k=2: midpoint rises from 22.63
 
 The k=3 step sweep confirms the same perception-distortion pattern as k=1 and k=2: one step gives the highest PSNR and lowest latency, while three-to-five steps are the perceptual operating region. At three steps, diffusion is marginally ahead of flow matching (31.58 vs 31.51 dB, DISTS 0.0717 vs 0.0719, KID 8.6 vs 9.0 × 10^-3); the difference is small relative to the 24-image benchmark. No additional k=3 architecture training is justified.
 
-Raw input cost is now 1, 2, or 3 bits/pixel before entropy coding. The reconstruction experiments show a strong rate-quality curve, but they do not establish the actual compressed rate. **Next:** begin Milestone 8: measure per-plane entropy/context entropy, implement lossless coding for the transmitted planes, and report actual bpp alongside PSNR, DISTS, KID, and decoding time. Defer the NF and hybrid tracks unless the compression study creates a likelihood-specific question.
+Raw input cost is now 1, 2, or 3 bits/pixel before entropy coding. The reconstruction experiments show a strong rate-quality curve, but they do not establish the actual compressed rate. **Next:** begin Milestone 8: measure per-plane entropy/context entropy, implement lossless coding for the transmitted planes, and report actual bpp alongside PSNR, DISTS, KID, and decoding time. Defer the NF track unless the compression study creates a likelihood-specific question; the hybrid track is covered by Milestone 6.
 
 ---
 

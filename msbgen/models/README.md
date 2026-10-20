@@ -16,6 +16,7 @@ see the [model guide](MODEL_GUIDE.md).
 | [`generative.py`](generative.py) | `ResidualGenerator`: what the generative models share (residual scaling, $B_7$ conditioning, `TimeUNet`) |
 | [`diffusion.py`](diffusion.py) | `MSBDiffusion`: conditional diffusion on the residual, p(R \| B7); `DiffusionConfig` |
 | [`flow.py`](flow.py) | `MSBFlow`: conditional flow matching on the residual, p(R \| B7); `FlowConfig` |
+| [`hybrid.py`](hybrid.py) | `MSBHybrid`: residual U-Net + conditional flow-matching correction + truncated diffusion refiner; `HybridConfig` |
 | [`normalizing_flow.py`](normalizing_flow.py) | `MSBNormalizingFlow`: patchwise conditional Glow likelihood and inverse sampling; `NormalizingFlowConfig` |
 | [`checkpoint.py`](checkpoint.py) | `save_checkpoint`, `load_model`, `read_checkpoint`, `build_model`; `GENERATIVE_KINDS` |
 | [`reconstructor.py`](reconstructor.py) | Checkpoint-backed regression and generative `Reconstructor`s, `load_reconstructor`, `discover_checkpoints` |
@@ -201,7 +202,7 @@ there is no arbitrary pickle code:
 
 ```python
 from msbgen.models import load_model
-model, ckpt = load_model("runs/unet-res/best.pt", device="cuda")   # MSBNet or MSBDiffusion
+model, ckpt = load_model("runs/unet-res/best.pt", device="cuda")   # MSBNet, MSBDiffusion, MSBFlow or MSBHybrid
 ```
 
 Writes are atomic (a temporary file, then rename), so an interrupted run never
@@ -259,6 +260,79 @@ validation and stored in the checkpoint. The PSNR argument of
 
 A test runs the sampler with an *oracle* velocity $(x_t - r) / t$: with straight
 paths, both solvers must land exactly on the original image for any number of steps.
+
+## Three-stage hybrid (`hybrid.py`)
+
+`MSBHybrid` composes the residual U-Net with flow matching and diffusion refinement.
+Every stage estimates the missing residual, so the input top-k planes remain exact:
+
+1. The residual U-Net estimates `r0`, a deterministic residual in `[-1, 1]`.
+2. A conditional flow model learns the correction `delta = r - r0`, conditioned on
+   top-k planes and `r0`. At inference it integrates from noise with Euler steps and
+   adds that correction to `r0`, giving coarse residual `r1`.
+3. A conditional diffusion model receives the top planes, `r0`, and `r1`, then
+   denoises a noised version of `r1` with truncated DDIM.
+
+The flow model is trained on straight-path velocity targets. The refiner is trained
+with cosine-schedule v-prediction, using stage-2 samples as its conditioning estimate.
+The summed objective is flow velocity MSE + diffusion velocity MSE, plus weighted
+residual-U-Net MSE when stage 1 is trainable. The HPC experiment initialized stage 1
+from the matching `unet-res` checkpoint and froze it; this isolates training to the
+two generative stages while retaining the strong deterministic estimate.
+
+```shell
+python -m msbgen.cli.train --preset hybrid --name hybrid-k2 --k 2 \
+  --init-unet runs/unet-res-k2/best.pt --freeze-unet --steps 40000 --device cuda
+python -m msbgen.cli.evaluate data/processed/kodak --k 2 \
+  --models runs/hybrid-k2/best.pt --hybrid-ablation \
+  --lpips --dists --kid --samples 8 --sample-steps 3
+```
+
+`--hybrid-ablation` compares the full model with stage 1 alone (`hybrid-k2-unet`)
+and stages 1+2 (`hybrid-k2-flow`). The full model uses three flow steps, two DDIM
+refinement steps, `refine_t=0.5`, and `eta=0` by default. Hybrid inference is not
+tiled, so very large images may require more GPU memory. The training checkpoint is
+selected by summed validation loss; compare models using held-out image metrics,
+not that loss.
+
+### Hybrid results (Kodak)
+
+Each k-specific model was trained on DIV2K for 40k steps with batch size 16 and
+128×128 crops; the best k=2 checkpoint is from step 38k. Evaluation uses all 24
+grayscale Kodak images and eight samples per stochastic method. KID is patch KID
+× 1000.
+
+| k | Method | PSNR ↑ | SSIM ↑ | LPIPS ↓ | DISTS ↓ | KID × 10³ ↓ | PSNR avg ↑ | Diversity |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | Residual U-Net | 18.60 | 0.6373 | 0.4550 | 0.2931 | 79.75 | — | — |
+| 1 | Sequential bitplane CNN (D4) | 18.56 | 0.6328 | 0.4718 | 0.2872 | 93.87 | — | — |
+| 1 | Diffusion | 17.75 | 0.6101 | 0.4245 | 0.2567 | 54.61 | 18.20 | 6.08 |
+| 1 | Flow matching | 18.11 | 0.6151 | 0.4190 | 0.2519 | 54.92 | 18.54 | 6.15 |
+| 1 | Hybrid | 18.22 | 0.6242 | 0.4237 | 0.2594 | **46.89** | 18.61 | 5.81 |
+| 2 | Residual U-Net | **26.14** | **0.8044** | 0.2443 | 0.1554 | 41.76 | — | — |
+| 2 | Sequential bitplane CNN (D4) | 25.65 | 0.7976 | 0.2807 | 0.1657 | 54.33 | — | — |
+| 2 | Diffusion | 25.63 | 0.7885 | 0.2134 | 0.1292 | 26.06 | 26.24 | 3.97 |
+| 2 | Flow matching | 25.60 | 0.7902 | 0.2141 | 0.1302 | 25.34 | 26.23 | 4.03 |
+| 2 | Hybrid | 25.99 | 0.7936 | **0.2051** | **0.1249** | **17.25** | **26.60** | 3.85 |
+| 3 | Residual U-Net | 32.00 | **0.9015** | 0.1171 | 0.0852 | 19.04 | — | — |
+| 3 | Sequential bitplane CNN (D4) | **32.04** | **0.9015** | 0.1425 | 0.0943 | 21.15 | — | — |
+| 3 | Diffusion | 31.58 | 0.8951 | 0.0941 | 0.0717 | 8.56 | 32.37 | 2.35 |
+| 3 | Flow matching | 31.51 | 0.8944 | 0.0953 | 0.0719 | 9.01 | 32.34 | 2.42 |
+| 3 | Hybrid | 31.65 | 0.8930 | **0.0905** | **0.0681** | **5.93** | **32.60** | 2.54 |
+
+The sequential bitplane CNN has MAE 25.03 / 10.49 / 4.94 and MSB consistency
+1.0000 at k=1/2/3. Its k=3 PSNR (32.04 dB) is just above residual U-Net (32.00 dB)
+and the hybrid (31.65 dB), while the hybrid has lower LPIPS, DISTS and KID. The
+deterministic model has no multi-sample PSNR or diversity measurement.
+
+At k=2 and k=3, the hybrid improves all three reported perceptual metrics over
+standalone diffusion and flow matching; at k=1, its KID is best but DISTS trails
+flow matching. Single-sample PSNR does not beat the residual U-Net. The hybrid's
+eight-sample mean PSNR is best at k=2/3. At k=3, turning off stage 3 gives 31.69 dB,
+0.0701 DISTS and 7.38 KID; adding diffusion refinement shifts this to 31.65 dB,
+0.0681 and 5.93. Thus the refiner improves perceptual similarity at a small PSNR
+cost. These are single-run results on a 24-image Kodak set, not multi-seed or
+cross-dataset evidence.
 
 ## Conditional normalizing flow (`normalizing_flow.py`)
 
@@ -321,11 +395,12 @@ fm = load_reconstructor("runs/flow/best.pt", steps=20, solver="heun")      # Flo
 
 Sampler options that don't apply to a checkpoint's kind are ignored (`eta` for flow
 matching, `solver` for diffusion, both for regression), so callers can pass them
-all. The normalizing flow has no step-count option and records its patch size.
+all. The hybrid accepts `steps` for flow matching and `refine_steps` / `refine_t` for
+the diffusion refiner. The normalizing flow has no step-count option and records its patch size.
 `sampler` holds the settings in use; `evaluate` records it in `summary.json`.
 
-**`DiffusionReconstructor`**, **`FlowReconstructor`**, and
-**`NormalizingFlowReconstructor`** are `stochastic`. `reconstruct` returns the sample for
+**`DiffusionReconstructor`**, **`FlowReconstructor`**, **`HybridReconstructor`**, and
+**`NormalizingFlowReconstructor`** are stochastic when their sampling stages are enabled. `reconstruct` returns the sample for
 `seed` (default 0), and `sample(..., seed)` draws any other. The noise comes from a
 CPU generator, so a seed gives the same image on CPU and GPU. `on_step` is called
 after every network evaluation: `evaluate` and the web app pass their **thermal guard**

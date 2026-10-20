@@ -52,61 +52,17 @@ date
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 
-WORKERS=$((SLURM_CPUS_PER_TASK - 2))
-echo "Using $WORKERS DataLoader workers"
-
-for bits in 1 2 3 4 5 6 7; do
-  python -m msbgen.cli.bitdepth train \
-    --input-bits "$bits" \
-    --train data/processed/div2k-train \
-    --val data/processed/div2k-valid \
-    --out runs/bitdepth-d4 \
-    --bit-depth 8 \
-    --depth 4 \
-    --epochs 30 \
-    --batch-size 128 \
-    --patch-size 48 \
-    --lr 1e-3 \
-    --lr-drop-epoch 16 \
-    --workers "$WORKERS" \
-    --device cuda \
-    --augment --no-thermal-guard
-done
-
-python -m msbgen.cli.bitdepth evaluate \
-  --models runs/bitdepth-d4 \
-  --test data/processed/kodak \
-  --start-bits 1 2 3 \
-  --end-bits 8 \
-  --bit-depth 8 \
-  --device cuda \
-  --save-images \
-  --out outputs/bitdepth/kodak
-
-python -m msbgen.cli.bitdepth plot \
-  outputs/bitdepth/kodak/evaluation.csv \
-  --out outputs/bitdepth/kodak/recovery.png
-
 for k in 1 2 3; do
-  if [ "$k" -eq 1 ]; then
-    suffix=""
-  else
-    suffix="-k${k}"
-  fi
+  if [ "$k" -eq 1 ]; then s=""; else s="-k${k}"; fi
+  python -m msbgen.cli.evaluate data/processed/kodak --k "$k" \
+    --models runs/cnn${s}/best.pt runs/unet${s}/best.pt runs/unet-res${s}/best.pt \
+             runs/diffusion${s}/best.pt runs/flow${s}/best.pt runs/hybrid${s}/best.pt \
+    --bitdepth-models runs/bitdepth-d4 --hybrid-ablation \
+    --lpips --dists --kid --samples 8 --sample-steps 3 --save-images 4 \
+    --out outputs/eval/kodak-final-k${k} --device cuda --no-thermal-guard
 
-  python -m msbgen.cli.evaluate \
-    data/processed/kodak \
-    --k "$k" \
-    --models \
-      "runs/cnn${suffix}/best.pt" \
-      "runs/unet${suffix}/best.pt" \
-      "runs/unet-res${suffix}/best.pt" \
-      "runs/diffusion${suffix}/best.pt" \
-      "runs/flow${suffix}/best.pt" \
-    --out "outputs/eval/kodak-all-k${k}" \
-    --samples 4 \
-    --save-images 4 \
-    --device cuda --no-thermal-guard
+  python -m msbgen.cli.plot_eval outputs/eval/kodak-final-k${k} \
+    --pair hybrid${s} bitdepth-d4 --out outputs/plots/final-k${k}
 done
 
 sync

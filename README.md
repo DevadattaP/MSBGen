@@ -33,7 +33,8 @@ research questions and milestones.
 | Conditional flow matching on the residual | ✅ done: [results](#flow-matching-results-kodak) |
 | Conditional normalizing flow | ✅ k=1 and patch-size ablation complete; not competitive as decoder: [results](#normalizing-flow-results-kodak) |
 | Multi-MSB experiments | ✅ k=1/2/3 model comparison complete |
-| Entropy coding and final codec | ⏳; reference range coder implemented, Kodak rate measurement next |
+| Three-stage hybrid (residual U-Net + flow matching + diffusion) | ✅ trained and evaluated at k=1/2/3: [results](#hybrid-results-kodak) |
+| Entropy coding and final codec | 🟡 reference range coder and Kodak rate measurement complete; production codec work remains |
 
 ### Bit-plane explorer
 
@@ -503,7 +504,7 @@ The k=1 Glow-style model completed 40k steps on DIV2K. It models dequantized res
 
 All test metrics use the same 24 Kodak images; stochastic-model KID uses eight samples per image. Averaging eight 128-pixel-patch flow samples raises PSNR to 17.69 dB, but diversity is 23.94 intensity levels versus about 6.1 for diffusion/flow matching. Moving to 256-pixel patches changes single-sample PSNR by only +0.08 dB and sample-mean PSNR by +0.02 dB; SSIM/LPIPS improve slightly, but DISTS/KID worsen slightly. It is about 22% faster per image and shows fewer obvious tile boundaries in the inspected example, but remains behind residual U-Net on PSNR, SSIM, and LPIPS for all 24 images. The outputs retain noisy texture and soft structure.
 
-The dequantized NLL is a continuous-density estimate, not measured lossless bpp. Decision: keep the normalizing flow as a negative k=1 baseline and defer the hybrid. Next, complete the k=3 comparison for CNN, direct U-Net, residual U-Net, diffusion, and flow matching, then compare all k=1/2/3 results. Full findings and HPC commands are in [PLAN.md](PLAN.md).
+The dequantized NLL is a continuous-density estimate, not measured lossless bpp. Keep the normalizing flow as a negative k=1 baseline. The k=1/2/3 comparison and follow-up three-stage hybrid experiments are now complete; hybrid results follow below.
 
 ### Multi-MSB results (Kodak)
 
@@ -515,9 +516,9 @@ The corrected k=3 evaluation uses the same 24 images and eight samples for each 
 | 2 | 22.63 | 26.14 | 25.63 / 0.129 / 26.1 | 25.60 / 0.130 / 25.3 |
 | 3 | 28.74 | **32.00** | 31.58 / **0.072** / **8.6** | 31.51 / 0.072 / 9.0 |
 
-At k=3, eight-sample mean PSNR is 32.37 dB for diffusion and 32.34 dB for flow matching, above the residual U-Net, with diversity around 2.4 intensity levels. Each extra transmitted plane adds roughly 6 dB for the midpoint baseline and about 5.9-7.9 dB for the learned/generative models. These are 24-image Kodak results; actual coded bpp is still unmeasured.
+At k=3, eight-sample mean PSNR is 32.37 dB for diffusion and 32.34 dB for flow matching, above the residual U-Net, with diversity around 2.4 intensity levels. Each extra transmitted plane adds roughly 6 dB for the midpoint baseline and about 5.9-7.9 dB for the learned/generative models. These are 24-image Kodak results; the reference coder's measured rates are reported below.
 
-The k=3 step sweep again places one step at the fidelity/latency point and three-to-five steps in the perceptual operating region. No further k=3 model training is planned. The next milestone is entropy coding and actual rate-quality measurement at k=1, 2, and 3.
+The k=3 step sweep again places one step at the fidelity/latency point and three-to-five steps in the perceptual operating region. The reference coder now measures Kodak rates of 0.165, 0.501 and 1.021 bpp at k=1, 2 and 3. Next priorities are multi-seed and cross-dataset evaluation, plus production codec refinements.
 
 The first Milestone 8 reference coder is available as:
 
@@ -539,8 +540,54 @@ The first Kodak measurement is complete. All 24 images round-tripped losslessly:
 
 These are actual rates for the reference coder, excluding image/container
 metadata. At those rates, the reconstruction points are 18.60 dB for residual
-U-Net at k=1, 26.14 dB at k=2, and 32.00 dB at k=3; diffusion gives the strongest
-perceptual scores at k=3 (31.58 dB, DISTS 0.072, KID 8.6 × 10^-3).
+U-Net at k=1, 26.14 dB at k=2, and 32.00 dB at k=3. The hybrid results below add
+perceptual reconstruction points at the same transmitted rates.
+
+### Hybrid results (Kodak)
+
+The hybrid uses a matching residual U-Net checkpoint for stage 1 (frozen in these
+runs), flow matching for a residual correction, and truncated diffusion refinement.
+All stages generate only missing low bits, preserving MSB consistency exactly. Runs
+used 40k steps, batch size 16, 128×128 DIV2K crops and EMA 0.999; the best k=2
+checkpoint was selected at step 38k. Evaluation used 24 grayscale Kodak images,
+eight samples for stochastic models, three flow steps, two DDIM refinement steps
+(`refine_t=0.5`, `eta=0`), and patch KID × 1000.
+
+| k | Method | PSNR ↑ | DISTS ↓ | KID × 10³ ↓ | PSNR avg ↑ | Diversity | Time / image (s) |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | Residual U-Net | **18.60** | 0.2931 | 79.75 | — | — | 0.006 |
+| 1 | Sequential bitplane CNN (D4) | 18.56 | 0.2872 | 93.87 | — | — | 0.091 |
+| 1 | Diffusion | 17.75 | 0.2567 | 54.61 | 18.20 | 6.08 | 0.088 |
+| 1 | Flow matching | 18.11 | **0.2519** | 54.92 | 18.54 | 6.15 | 0.059 |
+| 1 | Hybrid | 18.22 | 0.2594 | **46.89** | 18.61 | 5.81 | 0.101 |
+| 2 | Residual U-Net | **26.14** | 0.1554 | 41.76 | — | — | 0.006 |
+| 2 | Sequential bitplane CNN (D4) | 25.65 | 0.1657 | 54.33 | — | — | 0.062 |
+| 2 | Diffusion | 25.63 | 0.1292 | 26.06 | 26.24 | 3.97 | 0.111 |
+| 2 | Flow matching | 25.60 | 0.1302 | 25.34 | 26.23 | 4.03 | 0.059 |
+| 2 | Hybrid | 25.99 | **0.1249** | **17.25** | **26.60** | 3.85 | 0.101 |
+| 3 | Residual U-Net | 32.00 | 0.0852 | 19.04 | — | — | 0.006 |
+| 3 | Sequential bitplane CNN (D4) | **32.04** | 0.0943 | 21.15 | — | — | 0.052 |
+| 3 | Diffusion | 31.58 | 0.0717 | 8.56 | 32.37 | 2.35 | 0.088 |
+| 3 | Flow matching | 31.51 | 0.0719 | 9.01 | 32.34 | 2.42 | 0.059 |
+| 3 | Hybrid | 31.65 | **0.0681** | **5.93** | **32.60** | 2.54 | 0.102 |
+
+The sequential bitplane CNN (D4) remains the single-sample distortion target:
+18.56 / 25.65 / 32.04 dB at k=1/2/3 (SSIM 0.6328 / 0.7976 / 0.9015; LPIPS
+0.4718 / 0.2807 / 0.1425; DISTS 0.2872 / 0.1657 / 0.0943; MAE 25.03 / 10.49 /
+4.94). Its MSB consistency is 1.0000 at each k. It leads PSNR at k=3, narrowly
+above residual U-Net (32.00 dB) and the hybrid (31.65 dB), while the hybrid has
+lower LPIPS, DISTS and KID there. `PSNR avg` and diversity are not applicable to
+this deterministic model; the common evaluator now measures the other metrics.
+
+At k=2 and k=3 the hybrid improves DISTS and KID over both standalone generative
+models. It also gives the highest eight-sample mean PSNR at those bit depths, while
+single-sample PSNR remains below residual U-Net. At k=1 it gives the best KID, but
+flow matching has better DISTS. The k=3 ablation isolates refinement: stages 1+2
+score 31.69 dB / 0.0701 DISTS / 7.38 KID, versus 31.65 dB / 0.0681 / 5.93 for the
+full model. Diffusion refinement therefore trades a small amount of single-sample
+PSNR for better perceptual metrics in this setting. This is one training run on 24
+Kodak images; multiple seeds and broader datasets are needed before general claims.
+Timings are measurements from this evaluation hardware, not portable latency claims.
 
 ## Project structure
 

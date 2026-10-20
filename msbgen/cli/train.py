@@ -13,6 +13,8 @@ Presets (override any option after them):
                         training as the diffusion preset, straight-path velocity loss)
     --preset normalizing-flow
                         Milestone 5: conditional Glow likelihood on fixed-size residual patches
+    --preset hybrid     Milestone 6: residual U-Net -> flow matching -> diffusion refinement; use
+                        --init-unet runs/unet-res/best.pt [--freeze-unet] to start from a trained U-Net
 """
 
 from __future__ import annotations
@@ -30,8 +32,10 @@ PRESETS = {
     "flow": {"kind": "flow", "arch_args": {"width": 32, "levels": 4, "blocks": 1},
              "train": {"steps": 40_000, "ema": 0.999, "val_every": 2_000}},
     "normalizing-flow": {"kind": "normalizing_flow", "train": {"steps": 40_000, "val_every": 2_000}},
+    "hybrid": {"kind": "hybrid", "arch_args": {"width": 32, "levels": 4, "blocks": 1},
+               "train": {"steps": 40_000, "ema": 0.999, "val_every": 2_000}},
 }
-GENERATIVE = ("diffusion", "flow", "normalizing_flow")
+GENERATIVE = ("diffusion", "flow", "normalizing_flow", "hybrid")
 TRAIN_DEFAULTS = {"steps": 20_000, "ema": 0.0, "val_every": 1_000}
 
 
@@ -70,6 +74,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--solver", choices=["euler", "heun"],
                    help="flow matching: default ODE solver, used in validation and stored in the checkpoint (euler)")
     p.add_argument("--log-every", type=int, default=100)
+    h = p.add_argument_group("hybrid", "residual U-Net + flow matching + diffusion refinement")
+    h.add_argument("--init-unet", type=Path, help="residual U-Net regression checkpoint that initialises stage 1")
+    h.add_argument("--freeze-unet", action="store_true", help="keep stage 1 fixed (train only flow + refiner)")
+    h.add_argument("--refine-steps", type=int, help="default DDIM steps of the refiner, 0 = off (default 2)")
+    h.add_argument("--refine-t", type=float, help="noise level before refinement, in (0, 1] (default 0.5)")
+    h.add_argument("--unet-weight", type=float, help="weight of the stage-1 MSE when the U-Net trains (default 1)")
     p.add_argument("--val-limit", type=int, help="use only the first N validation images")
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--seed", type=int, default=0)
@@ -86,6 +96,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from msbgen.models.diffusion import DiffusionConfig
     from msbgen.models.flow import FlowConfig
+    from msbgen.models.hybrid import HybridConfig
     from msbgen.models.msb_net import ModelConfig
     from msbgen.models.normalizing_flow import NormalizingFlowConfig
     from msbgen.training import TrainConfig, train
@@ -102,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
         p.error("--sample-steps / --val-sample-steps do not apply to normalizing flows")
     if (args.sample_steps or args.val_sample_steps) and kind not in GENERATIVE:
         p.error("--sample-steps / --val-sample-steps only apply to the generative models")
-    if kind in ("diffusion", "flow"):
+    if kind in ("diffusion", "flow", "hybrid"):
         arch_args = dict(base["arch_args"])
         options = ("width", "levels", "blocks")
     elif kind == "normalizing_flow":
@@ -129,6 +140,15 @@ def main(argv: list[str] | None = None) -> int:
             model = DiffusionConfig(k=args.k, arch_args=arch_args, **sampler)
         elif kind == "flow":
             model = FlowConfig(k=args.k, arch_args=arch_args, solver=args.solver or "euler", **sampler)
+        elif kind == "hybrid":
+            unet_args = {"width": 24, "levels": 4}
+            if args.init_unet:
+                from msbgen.models.checkpoint import read_checkpoint
+
+                unet_args = read_checkpoint(args.init_unet)["model_config"]["arch_args"]
+            extra = {key: getattr(args, key) for key in ("refine_steps", "refine_t", "unet_weight")
+                     if getattr(args, key) is not None}
+            model = HybridConfig(k=args.k, arch_args=arch_args, unet_args=unet_args, **extra, **sampler)
         elif kind == "normalizing_flow":
             model = NormalizingFlowConfig(
                 k=args.k, crop_size=args.crop_size if args.crop_size is not None else args.crop,
@@ -147,6 +167,7 @@ def main(argv: list[str] | None = None) -> int:
         batch_size=args.batch_size, crop=args.crop, lr=args.lr, loss=args.loss,
         log_every=args.log_every, val_limit=args.val_limit, workers=args.workers,
         val_sample_steps=args.val_sample_steps, seed=args.seed, device=args.device,
+        init_unet=str(args.init_unet) if args.init_unet else None, freeze_unet=args.freeze_unet,
         thermal_guard=not args.no_thermal_guard, thermal=thermal, **train_opts,
     )
     try:

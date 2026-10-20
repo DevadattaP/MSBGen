@@ -88,12 +88,18 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("data", type=Path, help="folder of prepared .npy files or images")
     p.add_argument("--models", nargs="*", type=Path, default=[], help="checkpoints (e.g. runs/*/best.pt)")
+    p.add_argument("--bitdepth-models", nargs="*", type=Path, default=[], metavar="DIR",
+                   help="folders of sequential bitplane CNNs (bit_NN.pt), e.g. runs/bitdepth-d4")
     p.add_argument("--samples", type=int, default=1, help="draws per image for stochastic methods (default 1)")
     p.add_argument("--sample-steps", type=int,
                    help="generative models: sampling steps (DDIM / ODE; default: the checkpoint's, 3 for new runs)")
     p.add_argument("--eta", type=float, help="diffusion: DDIM eta, 0 = deterministic given z (default: checkpoint's)")
     p.add_argument("--solver", choices=["euler", "heun"], help="flow matching: ODE solver (default: checkpoint's)")
     p.add_argument("--k", type=int, default=1, help="transmitted planes (default 1)")
+    p.add_argument("--refine-steps", type=int, help="hybrid: refiner DDIM steps (default: checkpoint's)")
+    p.add_argument("--refine-t", type=float, help="hybrid: refiner start noise level (default: checkpoint's)")
+    p.add_argument("--hybrid-ablation", action="store_true",
+                   help="for hybrid checkpoints also score '<name>-unet' (stage 1) and '<name>-flow' (stages 1+2)")
     p.add_argument("--fills", nargs="*", default=list(FILL_RECONSTRUCTORS), help="fill baselines to include (default: zero mid random)")
     p.add_argument("--lpips", action="store_true", help="also compute LPIPS (needs `lpips`)")
     p.add_argument("--dists", action="store_true", help="also compute DISTS (needs `piq`)")
@@ -127,11 +133,26 @@ def main(argv: list[str] | None = None) -> int:
 
         for path in args.models:
             model = load_reconstructor(path, device=args.device, steps=args.sample_steps, eta=args.eta,
-                                       solver=args.solver, on_step=guard.check)
+                                       solver=args.solver, refine_steps=args.refine_steps,
+                                       refine_t=args.refine_t, on_step=guard.check)
             if not model.supports(args.k, n, 1):
                 print(f"skipped {path}: trained for k={model.config.k}", file=sys.stderr)
                 continue
             methods.append(model)
+            if args.hybrid_ablation and model.model.kind == "hybrid":
+                for suffix, extra in (("unet", {"steps": 0, "refine_steps": 0}),
+                                      ("flow", {"steps": args.sample_steps, "refine_steps": 0})):
+                    methods.append(load_reconstructor(path, device=args.device, name=f"{model.name}-{suffix}",
+                                                      on_step=guard.check, **extra))
+    if args.bitdepth_models:
+        from msbgen.models.reconstructor import BitplaneReconstructor
+
+        for folder in args.bitdepth_models:
+            bitplane = BitplaneReconstructor(folder, device=args.device)
+            if not bitplane.supports(args.k, n, 1):
+                print(f"skipped {folder}: missing bit_NN.pt for k={args.k}", file=sys.stderr)
+                continue
+            methods.append(bitplane)
     names = [m.name for m in methods]
     if len(set(names)) != len(names):
         p.error(f"method names must be unique, got {names} (run folder names are used for checkpoints)")

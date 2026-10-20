@@ -14,6 +14,7 @@ import torch
 
 from msbgen.core.reconstruction import Reconstructor
 from msbgen.models.checkpoint import GENERATIVE_KINDS, load_model, read_checkpoint
+from msbgen.models.bitdepth_recovery import BitplaneResidualCNN, recover_bitplanes
 
 
 def default_device() -> torch.device:
@@ -207,7 +208,77 @@ class NormalizingFlowReconstructor(_CheckpointReconstructor):
         return _to_estimate(out, self.model.max_value, top)
 
 
-SAMPLER_OPTIONS = {"diffusion": ("steps", "eta"), "flow": ("steps", "solver"), "normalizing_flow": ()}
+class HybridReconstructor(_CheckpointReconstructor):
+    """A hybrid checkpoint (U-Net + flow matching + diffusion refinement), run on the whole image.
+
+    `steps` = flow-matching steps (0: stage 1 only), `refine_steps` = refiner steps (0: no stage 3).
+    """
+
+    def __init__(self, checkpoint: Path, device: str | torch.device | None = None, name: str | None = None,
+                 steps: int | None = None, refine_steps: int | None = None, refine_t: float | None = None,
+                 eta: float | None = None, seed: int = 0, on_step: Callable[[], object] | None = None):
+        super().__init__(checkpoint, device, name, tile=1 << 30, margin=0)
+        c = self.config
+        self.steps = c.sample_steps if steps is None else steps
+        self.refine_steps = c.refine_steps if refine_steps is None else refine_steps
+        self.refine_t = c.refine_t if refine_t is None else refine_t
+        self.eta = c.eta if eta is None else eta
+        self.seed, self.on_step = seed, on_step
+        self.stochastic = self.steps > 0 or self.refine_steps > 0
+        self.label = (("Hybrid (U-Net only)" if self.steps == 0 else "Hybrid (U-Net + flow)")
+                      if self.refine_steps == 0 else "Hybrid (U-Net + flow + diffusion)")
+
+    @property
+    def sampler(self) -> dict:
+        return {"sample_steps": self.steps, "refine_steps": self.refine_steps, "refine_t": self.refine_t,
+                "eta": self.eta}
+
+    def reconstruct(self, top: np.ndarray, k: int, bit_depth: int) -> np.ndarray:
+        return self.sample(top, k, bit_depth, self.seed)
+
+    @torch.no_grad()
+    def sample(self, top: np.ndarray, k: int, bit_depth: int, seed: int) -> np.ndarray:
+        self._check(top, k, bit_depth)
+        gen = torch.Generator().manual_seed(seed)
+        out = self.model.sample(_to_tensor(top).to(self.device), steps=self.steps, refine_steps=self.refine_steps,
+                                refine_t=self.refine_t, eta=self.eta, generator=gen, on_step=self.on_step)
+        return _to_estimate(out, self.model.max_value, top)
+
+
+class BitplaneReconstructor(Reconstructor):
+    """The paper-style sequential bitplane CNNs (`runs/bitdepth-*/bit_NN.pt`): top k bits -> 8 bits."""
+
+    def __init__(self, folder: Path, device: str | torch.device | None = None, name: str | None = None):
+        self.folder = Path(folder)
+        self.device = torch.device(device) if device else default_device()
+        self.name = name or self.folder.name
+        self.label = "Sequential bitplane CNN"
+        self._models: dict[int, torch.nn.Module] = {}
+
+    def _path(self, bits: int) -> Path:
+        return self.folder / f"bit_{bits:02d}.pt"
+
+    def supports(self, k: int, bit_depth: int, channels: int) -> bool:
+        return channels == 1 and all(self._path(b).exists() for b in range(k, bit_depth))
+
+    def _model(self, bits: int) -> torch.nn.Module:
+        if bits not in self._models:
+            payload = torch.load(self._path(bits), map_location=self.device, weights_only=True)
+            model = BitplaneResidualCNN(**payload["config"])
+            model.load_state_dict(payload["state_dict"])
+            self._models[bits] = model.to(self.device).eval()
+        return self._models[bits]
+
+    @torch.no_grad()
+    def reconstruct(self, top: np.ndarray, k: int, bit_depth: int) -> np.ndarray:
+        maximum = float((1 << bit_depth) - 1)
+        source = _to_tensor(top) / maximum
+        out = recover_bitplanes(source, [self._model(b) for b in range(k, bit_depth)], k, bit_depth, self.device)
+        return out[0, 0].cpu().double().numpy() * maximum
+
+
+SAMPLER_OPTIONS = {"diffusion": ("steps", "eta"), "flow": ("steps", "solver"), "normalizing_flow": (),
+                   "hybrid": ("steps", "eta", "refine_steps", "refine_t")}
 
 
 def load_reconstructor(checkpoint: Path, device: str | torch.device | None = None, **kwargs) -> _CheckpointReconstructor:
@@ -217,7 +288,7 @@ def load_reconstructor(checkpoint: Path, device: str | torch.device | None = Non
     `solver` (flow matching); options that don't apply to the checkpoint's kind are ignored.
     """
     kind = read_checkpoint(checkpoint)["model_kind"]
-    sampler_keys = {"steps", "eta", "solver", "seed", "on_step"}
+    sampler_keys = {"steps", "eta", "solver", "seed", "on_step", "refine_steps", "refine_t"}
     keep = set(SAMPLER_OPTIONS.get(kind, ())) | ({"seed", "on_step"} if kind in GENERATIVE_KINDS else set())
     kwargs = {key: v for key, v in kwargs.items() if key not in sampler_keys or key in keep}
     if kind == "diffusion":
@@ -226,6 +297,8 @@ def load_reconstructor(checkpoint: Path, device: str | torch.device | None = Non
         return FlowReconstructor(checkpoint, device, **kwargs)
     if kind == "normalizing_flow":
         return NormalizingFlowReconstructor(checkpoint, device, **kwargs)
+    if kind == "hybrid":
+        return HybridReconstructor(checkpoint, device, **kwargs)
     return ModelReconstructor(checkpoint, device, **kwargs)
 
 
