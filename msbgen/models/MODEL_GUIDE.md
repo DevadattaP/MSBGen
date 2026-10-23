@@ -136,6 +136,12 @@ flow stage. The three losses are summed. With a pretrained frozen U-Net the firs
 stage contributes no training loss; with joint training its residual MSE is included
 with weight `unet_weight`.
 
+>- Residual U-Net: Makes a direct, deterministic estimate of the missing lower bits from the known top bits. “Residual” means it predicts the missing part relative to the known image, rather than rebuilding the whole image.
+>- Flow matching correction: Adds plausible detail to that estimate. It starts with random noise and uses a learned flow to transform it into a correction that fits the image.
+>- Diffusion refinement: Takes that corrected result, adds some noise, then learns to denoise it into a cleaner, more realistic reconstruction.
+>
+>In short: U-Net gives the stable base; flow adds plausible detail; diffusion polishes it.
+
 The HPC runs initialize each k-specific U-Net from the corresponding `unet-res`
 checkpoint and freeze it. The flow and diffusion stages train for 40k steps with EMA
 0.999; checkpoints are selected by the summed validation loss, which is not comparable
