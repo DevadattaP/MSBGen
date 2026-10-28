@@ -246,3 +246,88 @@ the evaluated methods. The per-image PSNR labels are specific to `kodim04` and a
    processing with a luminance/chrominance representation, and verify exact
    preservation of all transmitted channel MSBs. Report color-aware distortion
    and perceptual metrics under the same protocol for every baseline.
+
+
+29/10/2026
+
+# Experiment using ViT
+
+
+## Motivation
+
+The U-Net-based models only see local-to-regional context through convolutions and
+downsampling. A Vision Transformer (ViT) uses global self-attention over patch tokens, so
+every patch can use scene-wide structure from the transmitted planes. Two variants were
+tested for k=1, 2, 3:
+
+- **ViT:** a residual ViT regressor (`--preset vit`), the counterpart of the residual U-Net.
+  8x8 patches are embedded to 192-d tokens, mixed by 6 transformer blocks (6 heads) with fixed
+  2D sin-cos position embeddings, then unpatchified with a linear head and fused with a small
+  3x3 conv branch on the raw planes to avoid patch-grid artefacts. It predicts the missing
+  low-bit residual, so transmitted bits are preserved exactly (2.9 M parameters).
+- **ViT hybrid:** the three-stage hybrid with the residual ViT as stage 1 instead of the
+  residual U-Net (`--preset vit-hybrid`): ViT -> flow-matching correction -> truncated
+  diffusion refinement (10.9 M parameters, versus 12.3 M for the U-Net hybrid).
+
+## Training and Evaluation
+
+Both variants were trained on DIV2K crops (128 x 128) for 40,000 steps, batch size 16, learning
+rate 2e-4. The ViT has no EMA; the ViT hybrid uses EMA 0.999. Unlike the U-Net hybrid, the ViT
+hybrid's stage 1 was **trained jointly from scratch** (no `--init-unet`, no `--freeze-unet`),
+so `vit-hybrid-unet` below is that run's own stage 1, not the standalone `vit` checkpoint. The
+best checkpoints were at step 10k / 22k / 30k for ViT (k=1/2/3) and 36k / 40k / 40k for the
+ViT hybrid. Evaluation protocol is unchanged: 24 grayscale Kodak images, eight samples for
+stochastic methods, three flow steps, two DDIM refinement steps, `refine_t=0.5`, `eta=0`.
+
+| k | Method | PSNR (dB) | SSIM | LPIPS | DISTS | KID x 10^3 | PSNR of mean (8) | Time / image (s) |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | Residual U-Net | 18.60 | **0.6373** | 0.4550 | 0.2931 | 79.75 | — | 0.006 |
+| 1 | Sequential bitplane CNN (D4) | 18.56 | 0.6328 | 0.4718 | 0.2872 | 93.87 | — | 0.074 |
+| 1 | Hybrid (U-Net) | 18.22 | 0.6242 | 0.4237 | 0.2594 | **46.89** | 18.61 | 0.102 |
+| 1 | ViT | 18.35 | 0.6206 | 0.4662 | 0.2932 | 89.81 | — | 0.018 |
+| 1 | ViT hybrid | **18.64** | 0.6230 | 0.4293 | 0.2618 | 49.17 | **18.83** | 0.114 |
+| 1 | ViT hybrid, stage 1 only | 18.57 | 0.6216 | 0.4492 | 0.2923 | 94.11 | — | 0.018 |
+| 1 | ViT hybrid, stages 1+2 | 18.63 | 0.6200 | 0.4246 | 0.2560 | 54.02 | 18.81 | 0.076 |
+| | | | | | | | | |
+| 2 | Residual U-Net | **26.14** | **0.8044** | 0.2443 | 0.1554 | 41.76 | — | 0.006 |
+| 2 | Sequential bitplane CNN (D4) | 25.65 | 0.7976 | 0.2807 | 0.1657 | 54.33 | — | 0.062 |
+| 2 | Hybrid (U-Net) | 25.99 | 0.7936 | **0.2051** | **0.1249** | **17.25** | **26.60** | 0.102 |
+| 2 | ViT | 24.51 | 0.7777 | 0.2676 | 0.1644 | 48.19 | — | 0.017 |
+| 2 | ViT hybrid | 24.71 | 0.7698 | 0.2251 | 0.1314 | 19.46 | 25.30 | 0.114 |
+| 2 | ViT hybrid, stage 1 only | 24.39 | 0.7744 | 0.2666 | 0.1671 | 47.82 | — | 0.018 |
+| 2 | ViT hybrid, stages 1+2 | 24.65 | 0.7682 | 0.2224 | 0.1297 | 26.47 | 25.20 | 0.076 |
+| | | | | | | | | |
+| 3 | Residual U-Net | 32.00 | **0.9015** | 0.1171 | 0.0852 | 19.04 | — | 0.006 |
+| 3 | Sequential bitplane CNN (D4) | **32.04** | **0.9015** | 0.1425 | 0.0943 | 21.15 | — | 0.052 |
+| 3 | Hybrid (U-Net) | 31.65 | 0.8930 | **0.0905** | **0.0681** | **5.93** | **32.60** | 0.102 |
+| 3 | ViT | 30.78 | 0.8845 | 0.1487 | 0.0976 | 23.40 | — | 0.018 |
+| 3 | ViT hybrid | 31.21 | 0.8896 | 0.0951 | 0.0700 | 7.12 | 32.10 | 0.115 |
+| 3 | ViT hybrid, stage 1 only | 30.64 | 0.8828 | 0.1496 | 0.0975 | 22.90 | — | 0.018 |
+| 3 | ViT hybrid, stages 1+2 | 31.20 | 0.8896 | 0.0986 | 0.0717 | 9.51 | 32.00 | 0.076 |
+
+## Findings
+
+- The standalone ViT is worse than the residual U-Net on every distortion metric (PSNR
+  -0.25 / -1.63 / -1.22 dB at k=1/2/3) and below the plain CNN at k=2 and k=3. Global attention
+  did not compensate for the lack of a convolutional locality prior at this size and training
+  budget. It preserves the transmitted bits exactly (MSB consistency 1.0000).
+- The ViT hybrid has the highest single-sample PSNR of all methods at k=1 (18.64 dB, above the
+  residual U-Net's 18.60 and D4's 18.56) and the highest eight-sample-mean PSNR (18.83 dB). Its
+  KID (49.17) and DISTS (0.2618) are slightly behind the U-Net hybrid (46.89 / 0.2594).
+- At k=2 and k=3 the ViT hybrid is behind the U-Net hybrid on every metric (k=3: 31.21 dB /
+  DISTS 0.0700 / KID 7.12 versus 31.65 dB / 0.0681 / 5.93), but it is far better than standalone ViT.
+- The flow and diffusion stages help the ViT substantially on perceptual metrics: at k=3, LPIPS
+  0.1496 -> 0.0951, DISTS 0.0975 -> 0.0700 and KID 22.90 -> 7.12 compared with the hybrid's own
+  stage 1, and PSNR rises by 0.57 dB. Part of that PSNR gain comes from joint training of the
+  stage 1 rather than from sampling, so it is not directly comparable to the frozen U-Net hybrid.
+- Diffusion refinement improves KID relative to stages 1+2 at all k (54.02 -> 49.17,
+  26.47 -> 19.46, 9.51 -> 7.12) and slightly improves PSNR (+0.01 to +0.06 dB). Unlike the U-Net
+  hybrid, it did not cost PSNR here; DISTS/LPIPS at k=2 and k=3 change little.
+- Inference costs 0.018 s for ViT (3x the U-Net) and 0.114 s for the ViT hybrid (U-Net hybrid:
+  0.102 s) on the evaluation GPU.
+- Caveats: single training runs, 24 Kodak images, no ViT hyperparameter tuning (patch size,
+  width, depth, learning rate), and the hybrid training protocols differ (joint vs frozen stage 1).
+  The standalone ViT peaked early in validation (step 10k at k=1) and uses no EMA, so a tuned
+  schedule might change its ranking.
+
+![vit-hybrid comparison for k=1](outputs/eval/kodak-vit-hybrid-k1/images/kodim04_compare.png)

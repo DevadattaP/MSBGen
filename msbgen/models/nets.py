@@ -72,7 +72,66 @@ class UNet(nn.Module):
         return self.out(h)
 
 
-ARCHITECTURES = {"cnn": SimpleCNN, "unet": UNet}
+class ViTBlock(nn.Module):
+    def __init__(self, dim: int, heads: int, mlp_ratio: float = 4.0):
+        super().__init__()
+        self.heads = heads
+        self.norm1, self.qkv, self.proj = nn.LayerNorm(dim), nn.Linear(dim, 3 * dim), nn.Linear(dim, dim)
+        self.norm2 = nn.LayerNorm(dim)
+        self.mlp = nn.Sequential(nn.Linear(dim, int(dim * mlp_ratio)), nn.GELU(), nn.Linear(int(dim * mlp_ratio), dim))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b, n, d = x.shape
+        q, k, v = self.qkv(self.norm1(x)).reshape(b, n, 3, self.heads, d // self.heads).permute(2, 0, 3, 1, 4)
+        x = x + self.proj(F.scaled_dot_product_attention(q, k, v).transpose(1, 2).reshape(b, n, d))
+        return x + self.mlp(self.norm2(x))
+
+
+def sincos_2d(h: int, w: int, dim: int, device: torch.device) -> torch.Tensor:
+    """Fixed 2D sin-cos position embedding, (h·w, dim); defined for any grid size."""
+    q = dim // 4
+    freqs = torch.exp(-math.log(10_000) * torch.arange(q, device=device, dtype=torch.float32) / q)
+    ys = torch.arange(h, device=device, dtype=torch.float32)[:, None] * freqs[None]
+    xs = torch.arange(w, device=device, dtype=torch.float32)[:, None] * freqs[None]
+    ys, xs = ys[:, None, :].expand(h, w, q), xs[None, :, :].expand(h, w, q)
+    return torch.cat([ys.sin(), ys.cos(), xs.sin(), xs.cos()], dim=-1).reshape(h * w, dim)
+
+
+class ViT(nn.Module):
+    """Vision Transformer: patch tokens with global self-attention, plus a small conv branch.
+
+    Patches (`patch`×`patch`) are embedded, mixed by `depth` transformer blocks, and
+    unpatchified with a linear head. A 3×3 conv branch on the raw planes is fused with the
+    unpatchified features so the output has pixel-level detail and no patch-grid artefacts.
+    Position embeddings are fixed sin-cos, so any image size works (padded to a multiple of `patch`).
+    """
+
+    def __init__(self, in_ch: int, out_ch: int, patch: int = 8, dim: int = 192, depth: int = 6, heads: int = 6,
+                 mlp_ratio: float = 4.0):
+        super().__init__()
+        if dim % 4 or dim % heads:
+            raise ValueError("dim must be divisible by 4 and by heads")
+        self.multiple, self.patch, self.dim = patch, patch, dim
+        self.embed = nn.Conv2d(in_ch, dim, patch, stride=patch)
+        self.blocks = nn.ModuleList(ViTBlock(dim, heads, mlp_ratio) for _ in range(depth))
+        self.norm = nn.LayerNorm(dim)
+        self.head = nn.Linear(dim, 16 * patch * patch)
+        self.local = nn.Sequential(nn.Conv2d(in_ch, 32, 3, padding=1), nn.GELU())
+        self.fuse = nn.Sequential(nn.Conv2d(48, 64, 3, padding=1), nn.GELU(), nn.Conv2d(64, out_ch, 3, padding=1))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b, _, h, w = x.shape
+        p = self.patch
+        gh, gw = h // p, w // p
+        t = self.embed(x).flatten(2).transpose(1, 2) + sincos_2d(gh, gw, self.dim, x.device).to(x.dtype)
+        for block in self.blocks:
+            t = block(t)
+        t = self.head(self.norm(t))  # (B, N, 16·p²)
+        t = t.reshape(b, gh, gw, 16, p, p).permute(0, 3, 1, 4, 2, 5).reshape(b, 16, h, w)
+        return self.fuse(torch.cat([t, self.local(x)], dim=1))
+
+
+ARCHITECTURES = {"cnn": SimpleCNN, "unet": UNet, "vit": ViT}
 
 
 # ---------- time-conditioned U-Net (generative models) ----------

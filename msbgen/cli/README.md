@@ -259,6 +259,9 @@ python -m msbgen.cli.train --resume runs/unet-res/last.pt --preset unet-res
 | `diffusion` | `MSBDiffusion`: `TimeUNet` width 32, 4 levels, 1 block (4.0 M params); EMA 0.999, 40k steps, validation every 2k | samples R ~ p(R \| B7) | Milestone 3: conditional diffusion |
 | `flow` | `MSBFlow`: the same network and training as `diffusion`; velocity loss on straight paths | samples R ~ p(R \| B7) | Milestone 4: conditional flow matching |
 | `normalizing-flow` | `MSBNormalizingFlow`: conditional Glow, 4 scales × 4 coupling blocks, 128-pixel patches; 40k steps, likelihood checkpoint selection | samples R ~ p(R \| B7), no ODE steps | Milestone 5: conditional normalizing flow |
+| `hybrid` | `MSBHybrid`: residual U-Net → flow correction → diffusion refinement; EMA 0.999, 40k steps (`--init-unet`, `--freeze-unet`) | samples R | Milestone 6: hybrid |
+| `vit` | `ViT` patch 8, dim 192, depth 6, 6 heads (2.9 M params); 40k steps | residual: predicts R | ViT experiment |
+| `vit-hybrid` | `MSBHybrid` with a residual ViT as stage 1 (`unet_arch="vit"`, 10.9 M params); EMA 0.999, 40k steps | samples R | ViT experiment |
 
 **`--resume` rebuilds the configuration from the command line**, so repeat the same
 preset and options (and the same `--steps`: the learning-rate schedule depends on it).
@@ -269,9 +272,11 @@ preset and options (and the same `--steps`: the learning-rate schedule depends o
 | --- | --- | --- |
 | `--preset` | | One of the presets above |
 | `--name` | the preset name | Run name; output goes to `<out-dir>/<name>/` |
-| `--kind` | from the preset | `regression`, `diffusion`, `flow` or `normalizing_flow` |
-| `--arch`, `--output` | from the preset | Regression only: `cnn`/`unet`, `direct`/`residual` |
-| `--width`, `--depth`, `--levels`, `--blocks` | from the preset | Model size (`--depth`: CNN; `--blocks`: ResBlocks per resolution, generative models) |
+| `--kind` | from the preset | `regression`, `diffusion`, `flow`, `normalizing_flow` or `hybrid` |
+| `--arch`, `--output` | from the preset | Regression only: `cnn`/`unet`/`vit`, `direct`/`residual` |
+| `--width`, `--depth`, `--levels`, `--blocks` | from the preset | Model size (`--depth`: CNN layers / ViT blocks; `--blocks`: ResBlocks per resolution, generative models) |
+| `--patch`, `--dim`, `--heads` | 8, 192, 6 | ViT patch size, token width, attention heads (also for `--unet-arch vit`) |
+| `--unet-arch` | `unet` | Hybrid: stage-1 backbone, `unet` or `vit` |
 | `--crop-size`, `--scales`, `--blocks-per-scale` | 128, 4, 4 | Normalizing flow: fixed patch size, squeeze scales, and Glow blocks per scale |
 | `--condition-width`, `--hidden-width` | 32, 64 | Normalizing flow: B7 feature width and coupling subnet width |
 | `--k` | 1 | Transmitted planes (the model input is B7 … B(8−k)) |

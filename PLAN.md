@@ -1178,6 +1178,16 @@ Outcome: best perceptual scores at k=2/3 (DISTS, KID, LPIPS) and best 8-sample-m
 1. Try training the U-Net jointly (omit `--freeze-unet`, `--unet-weight`), a stronger stage-1 (wider/deeper, or the sequential model as stage 1), and tune `refine_t`, `--refine-steps` and flow steps (PSNR vs perceptual trade-off).
 2. Repeat over seeds, report paired uncertainty, and add tiled hybrid inference for large images.
 
+**Milestone 6b — ViT experiment (complete, k=1/2/3 on Kodak).** A residual ViT regressor (`--preset vit`, 8×8 patches, 192-d, 6 blocks, 2.9 M params) and a ViT-based hybrid (`--preset vit-hybrid`: ViT -> flow -> diffusion, stage 1 trained jointly from scratch, 10.9 M params) were trained with the same recipe as the other models.
+
+| k | ViT PSNR / DISTS / KID | ViT hybrid PSNR / DISTS / KID | U-Net hybrid PSNR / DISTS / KID |
+| ---: | --- | --- | --- |
+| 1 | 18.35 / 0.2932 / 89.8 | **18.64** / 0.2618 / 49.2 | 18.22 / 0.2594 / 46.9 |
+| 2 | 24.51 / 0.1644 / 48.2 | 24.71 / 0.1314 / 19.5 | 25.99 / 0.1249 / 17.3 |
+| 3 | 30.78 / 0.0976 / 23.4 | 31.21 / 0.0700 / 7.1 | 31.65 / 0.0681 / 5.9 |
+
+Outcome: the standalone ViT is below the residual U-Net at every k (and below the CNN at k=2/3). The ViT hybrid gives the best single-sample PSNR of all models at k=1 (18.64 dB, 8-sample mean 18.83 dB) but trails the U-Net hybrid in perceptual metrics at k=1 and on every metric at k=2/3. Generative stages improve the ViT strongly on LPIPS/DISTS/KID. Open items: tune ViT size/patch/lr/EMA, warm-start and freeze the ViT stage 1 for a like-for-like comparison with the U-Net hybrid, and repeat over seeds.
+
 ---
 
 ## Milestone 7 — Additional MSBs

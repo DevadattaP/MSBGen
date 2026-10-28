@@ -34,6 +34,7 @@ research questions and milestones.
 | Conditional normalizing flow | ✅ k=1 and patch-size ablation complete; not competitive as decoder: [results](#normalizing-flow-results-kodak) |
 | Multi-MSB experiments | ✅ k=1/2/3 model comparison complete |
 | Three-stage hybrid (residual U-Net + flow matching + diffusion) | ✅ trained and evaluated at k=1/2/3: [results](#hybrid-results-kodak) |
+| ViT regressor and ViT-based hybrid | ✅ trained and evaluated at k=1/2/3; below the U-Net models except ViT hybrid at k=1 PSNR: [results](#vit-results-kodak) |
 | Entropy coding and final codec | 🟡 reference range coder and Kodak rate measurement complete; production codec work remains |
 
 ### Bit-plane explorer
@@ -589,6 +590,45 @@ PSNR for better perceptual metrics in this setting. This is one training run on 
 Kodak images; multiple seeds and broader datasets are needed before general claims.
 Timings are measurements from this evaluation hardware, not portable latency claims.
 
+### ViT results (Kodak)
+
+Two Vision Transformer variants were added (`--preset vit`, `--preset vit-hybrid`) and trained for k=1/2/3
+with the same recipe (DIV2K, 40k steps, batch 16, 128×128 crops, lr 2e-4). `ViT` is a residual regressor:
+8×8 patch tokens (192-d), 6 transformer blocks with 6 heads, fixed 2D sin-cos position embeddings, a linear
+unpatchify head and a 3×3 conv fusion branch (2.9 M parameters, no EMA). `ViT hybrid` uses it as stage 1 of
+the hybrid (10.9 M parameters, EMA 0.999). Unlike the U-Net hybrid, the ViT hybrid trained its stage 1 jointly
+from scratch (not initialized or frozen). Best checkpoints: ViT at step 10k/22k/30k, ViT hybrid at 36k/40k/40k.
+Evaluation protocol is the same as above.
+
+| k | Method | PSNR ↑ | SSIM ↑ | LPIPS ↓ | DISTS ↓ | KID × 10³ ↓ | PSNR avg ↑ | Diversity | Time / image (s) |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | Residual U-Net | 18.60 | **0.6373** | 0.4550 | 0.2931 | 79.75 | — | — | 0.006 |
+| 1 | Hybrid (U-Net) | 18.22 | 0.6242 | **0.4237** | **0.2594** | **46.89** | 18.61 | 5.81 | 0.102 |
+| 1 | ViT | 18.35 | 0.6206 | 0.4662 | 0.2932 | 89.81 | — | — | 0.018 |
+| 1 | ViT hybrid | **18.64** | 0.6230 | 0.4293 | 0.2618 | 49.17 | **18.83** | 5.07 | 0.114 |
+| 2 | Residual U-Net | **26.14** | **0.8044** | 0.2443 | 0.1554 | 41.76 | — | — | 0.006 |
+| 2 | Hybrid (U-Net) | 25.99 | 0.7936 | **0.2051** | **0.1249** | **17.25** | **26.60** | 3.85 | 0.102 |
+| 2 | ViT | 24.51 | 0.7777 | 0.2676 | 0.1644 | 48.19 | — | — | 0.017 |
+| 2 | ViT hybrid | 24.71 | 0.7698 | 0.2251 | 0.1314 | 19.46 | 25.30 | 4.27 | 0.114 |
+| 3 | Residual U-Net | 32.00 | **0.9015** | 0.1171 | 0.0852 | 19.04 | — | — | 0.006 |
+| 3 | Hybrid (U-Net) | 31.65 | 0.8930 | **0.0905** | **0.0681** | **5.93** | **32.60** | 2.54 | 0.102 |
+| 3 | ViT | 30.78 | 0.8845 | 0.1487 | 0.0976 | 23.40 | — | — | 0.018 |
+| 3 | ViT hybrid | 31.21 | 0.8896 | 0.0951 | 0.0700 | 7.12 | 32.10 | 2.59 | 0.115 |
+
+The standalone ViT is below the residual U-Net at every k (−0.25 / −1.63 / −1.22 dB) and below the plain CNN
+at k=2 and k=3: global attention did not make up for the missing convolutional locality prior at this size
+and budget. Flow matching and diffusion improve it substantially on perceptual metrics (k=3 versus the ViT
+hybrid's own stage 1: LPIPS 0.1496 → 0.0951, DISTS 0.0975 → 0.0700, KID 22.90 → 7.12). At k=1 the ViT hybrid
+reaches the best single-sample PSNR of all models (18.64 dB) and the best eight-sample mean (18.83 dB), with
+DISTS/KID slightly behind the U-Net hybrid; at k=2 and k=3 it trails the U-Net hybrid on every metric. Stage
+ablations (`vit-hybrid-unet`, `vit-hybrid-flow`) are in `outputs/eval/kodak-vit-hybrid-k*/`. Single runs, 24
+images, untuned ViT hyperparameters, and different stage-1 protocols: treat the comparison as indicative.
+
+```shell
+python -m msbgen.cli.train --preset vit --name vit-k2 --k 2 --device cuda
+python -m msbgen.cli.train --preset vit-hybrid --name vit-hybrid-k2 --k 2 --device cuda
+```
+
 ## Project structure
 
 ```shell
@@ -603,7 +643,7 @@ MSBGen/
 │   │   ├── metrics.py     # PSNR, SSIM, MAE
 │   │   └── image_io.py    # decode uploads → grayscale/RGB uint8/uint16 arrays, PNG encoding
 │   ├── data/              # Dataset download/preparation + training crops (see data/README.md)
-│   ├── models/            # CNN / U-Net, diffusion, flow matching, normalizing flow, checkpoints and metrics
+│   ├── models/            # CNN / U-Net / ViT, diffusion, flow matching, normalizing flow, hybrids, checkpoints and metrics
 │   ├── training.py        # training loop: regression + generative models, validation, checkpoints, resume
 │   ├── utils/             # gpu_guard / cpu_guard / thermal: pause training when too hot
 │   ├── cli/               # Command-line tools (see cli/README.md)

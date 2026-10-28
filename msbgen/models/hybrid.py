@@ -33,12 +33,12 @@ from msbgen.models.nets import TimeUNet
 @dataclass
 class HybridConfig:
     kind: ClassVar[str] = "hybrid"
-    arch: ClassVar[str] = "unet+tunet"
     output: ClassVar[str] = "residual"
 
     k: int = 1
     bit_depth: int = 8
     channels: int = 1
+    unet_arch: str = "unet"  # stage-1 backbone: "unet" or "vit"
     unet_args: dict = field(default_factory=lambda: {"width": 24, "levels": 4})  # stage 1
     arch_args: dict = field(default_factory=lambda: {"width": 32, "levels": 4, "blocks": 1})  # stages 2 and 3
     sample_steps: int = 3  # default flow-matching (Euler) steps; 0 = stage 1 only
@@ -58,6 +58,10 @@ class HybridConfig:
         if not 0 <= self.eta <= 1:
             raise ValueError(f"eta must be in [0, 1], got {self.eta}")
 
+    @property
+    def arch(self) -> str:
+        return f"{self.unet_arch}+tunet"
+
     def to_dict(self) -> dict:
         return asdict(self)
 
@@ -69,7 +73,7 @@ class MSBHybrid(nn.Module):
         super().__init__()
         self.config = config
         c, k = config.channels, config.k
-        self.unet = MSBNet(ModelConfig(arch="unet", output="residual", k=k, bit_depth=config.bit_depth,
+        self.unet = MSBNet(ModelConfig(arch=config.unet_arch, output="residual", k=k, bit_depth=config.bit_depth,
                                        channels=c, arch_args=config.unet_args))
         self.flow = TimeUNet(c + c * k + c, c, **config.arch_args)  # [x_t, planes, r0]
         self.refiner = TimeUNet(c + c * k + 2 * c, c, **config.arch_args)  # [x_t, planes, r0, r1]

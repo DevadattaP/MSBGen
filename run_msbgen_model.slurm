@@ -54,15 +54,38 @@ export MKL_NUM_THREADS=1
 
 for k in 1 2 3; do
   if [ "$k" -eq 1 ]; then s=""; else s="-k${k}"; fi
+
+  python -m msbgen.cli.train --preset vit --name vit${s} --k "$k" \
+    --device cuda --no-thermal-guard
+
   python -m msbgen.cli.evaluate data/processed/kodak --k "$k" \
     --models runs/cnn${s}/best.pt runs/unet${s}/best.pt runs/unet-res${s}/best.pt \
              runs/diffusion${s}/best.pt runs/flow${s}/best.pt runs/hybrid${s}/best.pt \
+             runs/vit${s}/best.pt \
     --bitdepth-models runs/bitdepth-d4 --hybrid-ablation \
     --lpips --dists --kid --samples 8 --sample-steps 3 --save-images 4 \
-    --out outputs/eval/kodak-final-k${k} --device cuda --no-thermal-guard
+    --out outputs/eval/kodak-vit-k${k} --device cuda --no-thermal-guard
 
-  python -m msbgen.cli.plot_eval outputs/eval/kodak-final-k${k} \
-    --pair hybrid${s} bitdepth-d4 --out outputs/plots/final-k${k}
+  python -m msbgen.cli.plot_eval outputs/eval/kodak-vit-k${k} \
+    --pair vit${s} unet-res${s} --out outputs/plots/vit-k${k}
+done
+
+for k in 1 2 3; do
+  if [ "$k" -eq 1 ]; then s=""; else s="-k${k}"; fi
+
+  python -m msbgen.cli.train --preset vit-hybrid --name vit-hybrid${s} --k "$k" \
+    --device cuda --no-thermal-guard
+
+  python -m msbgen.cli.evaluate data/processed/kodak --k "$k" \
+    --models runs/cnn${s}/best.pt runs/unet${s}/best.pt runs/unet-res${s}/best.pt \
+             runs/diffusion${s}/best.pt runs/flow${s}/best.pt runs/hybrid${s}/best.pt \
+             runs/vit${s}/best.pt runs/vit-hybrid${s}/best.pt \
+    --bitdepth-models runs/bitdepth-d4 --hybrid-ablation \
+    --lpips --dists --kid --samples 8 --sample-steps 3 --save-images 4 \
+    --out outputs/eval/kodak-vit-hybrid-k${k} --device cuda --no-thermal-guard
+
+  python -m msbgen.cli.plot_eval outputs/eval/kodak-vit-hybrid-k${k} \
+    --pair vit-hybrid${s} hybrid${s} --out outputs/plots/vit-hybrid-k${k}
 done
 
 sync

@@ -24,13 +24,14 @@ Two scales appear in the code:
 | --- | --- | --- | --- | --- |
 | `MSBNet` with `SimpleCNN` | Encoded top-k bitplanes | Full image or residual estimate | MSE by default; optional L1 | One deterministic forward pass |
 | `MSBNet` with `UNet` | Encoded top-k bitplanes | Full image or residual estimate | MSE by default; optional L1 | One deterministic forward pass |
+| `MSBNet` with `ViT` | Encoded top-k bitplanes | Full image or residual estimate | MSE by default; optional L1 | One deterministic forward pass |
 | `MSBDiffusion` | Noisy residual, top-k planes, time | Diffusion velocity `v` | Velocity MSE | DDIM denoising from Gaussian noise |
 | `MSBFlow` | Interpolated residual/noise, top-k planes, time | Flow velocity | Velocity MSE | Integrate learned ODE, Euler or Heun |
 | `MSBHybrid` | Residual estimate, noisy correction/residual, top-k planes and stage estimates | Residual; flow correction velocity; diffusion velocity | Optional residual-U-Net MSE + flow velocity MSE + diffusion velocity MSE | Residual U-Net -> flow correction -> truncated DDIM refinement |
 | `MSBNormalizingFlow` | Dequantized residual and top-k condition | Density / likelihood | Negative log likelihood in bits per dimension | Draw latent noise and invert the flow |
 | `BitplaneResidualCNN` | Current partial image | Logit for the next binary plane | Binary cross entropy with logits | Predict and add each missing plane sequentially |
 
-`SimpleCNN`, `UNet`, and `TimeUNet` are backbones rather than full image-task models. The objective and meaning of their outputs are set by the model that wraps them.
+`SimpleCNN`, `UNet`, `ViT`, and `TimeUNet` are backbones rather than full image-task models. The objective and meaning of their outputs are set by the model that wraps them.
 
 ## 3. Deterministic Regression: CNN and U-Net
 
@@ -42,8 +43,9 @@ Two scales appear in the code:
 
 - **SimpleCNN (`arch="cnn"`)**: 3x3 convolution, ReLU, repeated 3x3 convolution/ReLU layers at a constant width, then a 3x3 output convolution. The default width/depth is 64/8. It is fully convolutional and uses only local spatial context.
 - **UNet (`arch="unet"`)**: each encoder/decoder block contains two 3x3 convolutions with ReLU. Max pooling downsamples; channel counts double at each level. Transposed convolutions upsample, encoder features are concatenated as skip connections, and a final 1x1 convolution produces the output. The default is width 24 and four downsampling levels.
+- **ViT (`arch="vit"`)**: a Vision Transformer. `patch`×`patch` blocks (default 8) of the encoded planes are embedded into `dim`-wide tokens (default 192), given fixed 2D sin-cos position embeddings (any image size works), and processed by `depth` (default 6) pre-norm transformer blocks with `heads` (default 6) global self-attention heads. A linear head unpatchifies the tokens to 16 channels per pixel, which are concatenated with a 3x3 conv branch on the raw planes and fused by two 3x3 convolutions to avoid patch-grid artefacts. Inputs are padded to a multiple of `patch`. Default size is 2.9 M parameters.
 
-Neither backbone has a sigmoid itself; `MSBNet` applies the selected output mapping.
+None of these backbones has a sigmoid itself; `MSBNet` applies the selected output mapping.
 
 ### Output, target, and loss
 
@@ -66,6 +68,8 @@ Example:
 ```bash
 python -m msbgen.cli.train --preset unet-res --name unet-res-k1 --k 1
 ```
+
+The ViT regressor is trained with `--preset vit` (residual output, 40k steps; `--patch`, `--dim`, `--depth`, `--heads` override its size). On Kodak it is below the residual U-Net at every k (18.35 / 24.51 / 30.78 dB versus 18.60 / 26.14 / 32.00 dB) and below the plain CNN at k=2 and k=3; see the ViT section under the hybrid.
 
 ## 4. Shared Generative Backbone: TimeUNet
 
@@ -195,6 +199,25 @@ Single-sample PSNR remains below residual U-Net. At k=3, the flow-only ablation 
 training runs on 24 Kodak images; multi-seed and broader-dataset confirmation remains
 necessary.
 
+### ViT stage 1 (`unet_arch="vit"`)
+
+`HybridConfig.unet_arch` selects the stage-1 backbone: `"unet"` (default) or `"vit"`; the other stages and the exactness guarantee are unchanged. `--preset vit-hybrid` (or `--unet-arch vit`) builds it; `--init-unet` takes the architecture from the given checkpoint. The reported runs trained stage 1 jointly from scratch (no `--init-unet`, no `--freeze-unet`) for 40k steps with EMA 0.999.
+
+```bash
+python -m msbgen.cli.train --preset vit-hybrid --name vit-hybrid-k2 --k 2 --device cuda
+```
+
+| k | Method | PSNR ↑ | LPIPS ↓ | DISTS ↓ | KID × 10³ ↓ | PSNR of 8-sample mean ↑ | Diversity |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | ViT | 18.35 | 0.4662 | 0.2932 | 89.81 | — | — |
+| 1 | ViT hybrid | **18.64** | 0.4293 | 0.2618 | 49.17 | **18.83** | 5.07 |
+| 2 | ViT | 24.51 | 0.2676 | 0.1644 | 48.19 | — | — |
+| 2 | ViT hybrid | 24.71 | 0.2251 | 0.1314 | 19.46 | 25.30 | 4.27 |
+| 3 | ViT | 30.78 | 0.1487 | 0.0976 | 23.40 | — | — |
+| 3 | ViT hybrid | 31.21 | 0.0951 | 0.0700 | 7.12 | 32.10 | 2.59 |
+
+The ViT hybrid has the best single-sample PSNR of all models at k=1, but trails the U-Net hybrid on every metric at k=2 and k=3 (k=3: 31.21 dB / 0.0700 DISTS / 7.12 KID versus 31.65 / 0.0681 / 5.93). Its generative stages strongly improve the standalone ViT on LPIPS, DISTS and KID. Stage 1 differs in training protocol from the U-Net hybrid (joint versus frozen) and ViT hyperparameters were not tuned, so the comparison is indicative only.
+
 ## 8. Conditional Normalizing Flow (`MSBNormalizingFlow`)
 
 ### Training input and target
@@ -243,7 +266,7 @@ python -m msbgen.cli.bitdepth evaluate --models runs/bitdepth-d4 --test data/pro
 
 ## 10. Shared Training, Checkpoints, and Inference
 
-The standard training CLI is `python -m msbgen.cli.train`. Its regression presets are `cnn`, `unet`, and `unet-res`; generative presets are `diffusion`, `flow`, `normalizing-flow`, and `hybrid`. Prepared training/validation arrays default to `data/processed/div2k-train` and `data/processed/div2k-valid`. A run directory contains configuration, JSONL history, `last.pt` for resume, and `best.pt` for inference.
+The standard training CLI is `python -m msbgen.cli.train`. Its regression presets are `cnn`, `unet`, `unet-res`, and `vit`; generative presets are `diffusion`, `flow`, `normalizing-flow`, `hybrid`, and `vit-hybrid`. Prepared training/validation arrays default to `data/processed/div2k-train` and `data/processed/div2k-valid`. A run directory contains configuration, JSONL history, `last.pt` for resume, and `best.pt` for inference.
 
 Standard checkpoints record model kind, configuration, inference weights, step, metrics, and training configuration. With EMA, they also retain raw training weights for resuming. `load_model()` reconstructs the PyTorch module directly; `load_reconstructor()` wraps it for the evaluation CLI, API, or web application and handles image scaling, sampling seeds, and tiling for large inputs.
 
@@ -265,6 +288,7 @@ Not all of them use only convolutions. Also, the models don’t need to enlarge 
 
 - **CNN regression:** no downsampling or upsampling. Same-resolution convolutions produce a full-resolution image estimate (or missing residual), pixel by pixel.
 - **U-Net regression:** does downsample with max pooling, then upsamples with ConvTranspose2d. Skip connections bring fine-resolution features back into the decoder.
+- **ViT regression:** tokenizes the image into non-overlapping patches, mixes them with global self-attention, then unpatchifies back to full resolution; a convolutional branch restores pixel-level detail.
 - **Diffusion/flow TimeUNet:** also has a down/up path, but upsamples with nearest-neighbor interpolation followed by convolution, rather than transposed convolution. Its output is a full-resolution residual prediction, velocity, or noise-related estimate; sampling turns that into the reconstructed image.
 - **Sequential bitplane CNN:** keeps the image dimensions unchanged. It predicts the next bitplane at each pixel, scales that plane by its bit significance, and adds it before predicting the next plane.
 - **Normalizing flow:** reconstructs residual patches by inverting learned transformations; it uses internal pixel shuffle/unshuffle operations, not a U-Net-style decoder.

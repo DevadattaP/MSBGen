@@ -10,13 +10,13 @@ see the [model guide](MODEL_GUIDE.md).
 
 | Module | What it does |
 | --- | --- |
-| [`nets.py`](nets.py) | Backbones: `SimpleCNN`, `UNet` and the time-conditioned `TimeUNet` |
+| [`nets.py`](nets.py) | Backbones: `SimpleCNN`, `UNet`, `ViT` and the time-conditioned `TimeUNet` |
 | [`bitdepth_recovery.py`](bitdepth_recovery.py) | Paper-style one-plane CNN, patch dataset, trainer, and sequential recovery |
 | [`msb_net.py`](msb_net.py) | `MSBNet`: backbone + input encoding + output mode; `ModelConfig` (regression) |
 | [`generative.py`](generative.py) | `ResidualGenerator`: what the generative models share (residual scaling, $B_7$ conditioning, `TimeUNet`) |
 | [`diffusion.py`](diffusion.py) | `MSBDiffusion`: conditional diffusion on the residual, p(R \| B7); `DiffusionConfig` |
 | [`flow.py`](flow.py) | `MSBFlow`: conditional flow matching on the residual, p(R \| B7); `FlowConfig` |
-| [`hybrid.py`](hybrid.py) | `MSBHybrid`: residual U-Net + conditional flow-matching correction + truncated diffusion refiner; `HybridConfig` |
+| [`hybrid.py`](hybrid.py) | `MSBHybrid`: residual U-Net (or ViT, `unet_arch="vit"`) + conditional flow-matching correction + truncated diffusion refiner; `HybridConfig` |
 | [`normalizing_flow.py`](normalizing_flow.py) | `MSBNormalizingFlow`: patchwise conditional Glow likelihood and inverse sampling; `NormalizingFlowConfig` |
 | [`checkpoint.py`](checkpoint.py) | `save_checkpoint`, `load_model`, `read_checkpoint`, `build_model`; `GENERATIVE_KINDS` |
 | [`reconstructor.py`](reconstructor.py) | Checkpoint-backed regression and generative `Reconstructor`s, `load_reconstructor`, `discover_checkpoints` |
@@ -86,6 +86,17 @@ The CNN answers "how much does *local* context recover?", and the U-Net answers
 "how much does *global* context add?". Comparing them tells us how far the
 reconstruction depends on large-scale structure, which is the kind of thing a
 generative prior should be good at.
+
+**ViT (`arch="vit"`).** `ViT(in_ch, out_ch, patch=8, dim=192, depth=6, heads=6)` embeds
+`patch`×`patch` blocks of the encoded planes into tokens, adds fixed 2D sin-cos position
+embeddings (computed on the fly, so any image size works), applies `depth` pre-norm
+transformer blocks with global self-attention (`scaled_dot_product_attention`), and
+unpatchifies with a linear head (16 channels per pixel). A 3×3 conv branch on the raw
+planes is concatenated and fused by two convs to remove patch-grid artefacts. Inputs are
+padded to a multiple of `patch`. Default size: 2.9 M params. Use it with `--preset vit`
+(residual output, 40k steps); `--patch`, `--dim`, `--depth` and `--heads` override the
+architecture. Tiled inference works as for the other regressors, though attention makes
+it cost more than the U-Net (0.018 s versus 0.006 s per Kodak image).
 
 **Default sizes and the laptop GPU.** On the development machine (GeForce MX350,
 2 GB) with batch 16 of 128×128 crops, measured in fp32:
@@ -333,6 +344,45 @@ eight-sample mean PSNR is best at k=2/3. At k=3, turning off stage 3 gives 31.69
 0.0681 and 5.93. Thus the refiner improves perceptual similarity at a small PSNR
 cost. These are single-run results on a 24-image Kodak set, not multi-seed or
 cross-dataset evidence.
+
+### ViT stage 1 (`unet_arch="vit"`)
+
+`HybridConfig.unet_arch` (`"unet"` default, or `"vit"`) selects the stage-1 backbone;
+`unet_args` holds its arguments, and `HybridConfig.arch` reports e.g. `vit+tunet`. The
+stage stays a residual regressor, so the remaining stages and exactness are unchanged.
+`--preset vit-hybrid` builds it; `--unet-arch vit` does the same from `--preset hybrid`,
+and `--init-unet` reads the architecture from the given checkpoint.
+
+```shell
+python -m msbgen.cli.train --preset vit-hybrid --name vit-hybrid-k2 --k 2 --device cuda
+```
+
+The reported ViT runs trained stage 1 jointly from scratch (no `--init-unet`, no
+`--freeze-unet`), 40k steps, EMA 0.999; standalone `vit` runs used no EMA. Kodak results
+(same protocol as above; best checkpoints: ViT step 10k/22k/30k, ViT hybrid 36k/40k/40k):
+
+| k | Method | PSNR ↑ | SSIM ↑ | LPIPS ↓ | DISTS ↓ | KID × 10³ ↓ | PSNR avg ↑ | Diversity |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | ViT | 18.35 | 0.6206 | 0.4662 | 0.2932 | 89.81 | — | — |
+| 1 | ViT hybrid | **18.64** | 0.6230 | 0.4293 | 0.2618 | 49.17 | **18.83** | 5.07 |
+| 1 | ViT hybrid, stages 1+2 | 18.63 | 0.6200 | 0.4246 | 0.2560 | 54.02 | 18.81 | 5.29 |
+| 1 | ViT hybrid, stage 1 | 18.57 | 0.6216 | 0.4492 | 0.2923 | 94.11 | — | — |
+| 2 | ViT | 24.51 | 0.7777 | 0.2676 | 0.1644 | 48.19 | — | — |
+| 2 | ViT hybrid | 24.71 | 0.7698 | 0.2251 | 0.1314 | 19.46 | 25.30 | 4.27 |
+| 2 | ViT hybrid, stages 1+2 | 24.65 | 0.7682 | 0.2224 | 0.1297 | 26.47 | 25.20 | 4.19 |
+| 2 | ViT hybrid, stage 1 | 24.39 | 0.7744 | 0.2666 | 0.1671 | 47.82 | — | — |
+| 3 | ViT | 30.78 | 0.8845 | 0.1487 | 0.0976 | 23.40 | — | — |
+| 3 | ViT hybrid | 31.21 | 0.8896 | 0.0951 | 0.0700 | 7.12 | 32.10 | 2.59 |
+| 3 | ViT hybrid, stages 1+2 | 31.20 | 0.8896 | 0.0986 | 0.0717 | 9.51 | 32.00 | 2.48 |
+| 3 | ViT hybrid, stage 1 | 30.64 | 0.8828 | 0.1496 | 0.0975 | 22.90 | — | — |
+
+The standalone ViT is below the residual U-Net at every k (−0.25 / −1.63 / −1.22 dB)
+and below the CNN at k=2/3. The ViT hybrid has the best single-sample PSNR of all
+models at k=1 (18.64 dB) but trails the U-Net hybrid on every metric at k=2/3 (k=3:
+31.21 dB / 0.0700 DISTS / 7.12 KID versus 31.65 / 0.0681 / 5.93). Flow and diffusion
+improve the ViT strongly on LPIPS/DISTS/KID, and refinement improves KID at every k.
+Because stage 1 is trained jointly here but frozen in the U-Net hybrid, and ViT
+hyperparameters were not tuned, the comparison with the U-Net hybrid is indicative only.
 
 ## Conditional normalizing flow (`normalizing_flow.py`)
 

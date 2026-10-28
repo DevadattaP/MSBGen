@@ -346,10 +346,47 @@ For the scikit-image "astronaut" photo (RGB, 8-bit):
 
 The metrics measure different things, and a single number can mislead. This is
 why the analysis reports all three for every fill, and why PLAN.md warns against
-relying on PSNR alone. Generative models make this worse, because sharp invented
-detail typically lowers PSNR while raising perceived quality. LPIPS (a learned
-perceptual distance) and FID (realism over a whole dataset) will cover that. They
-need pretrained networks, so they will be added with the deterministic baselines.
+relying on PSNR alone. Generative models make this especially important: plausible
+invented detail can lower PSNR while improving perceptual similarity. The model
+evaluator therefore optionally adds LPIPS, DISTS and patch KID, which use
+pretrained feature networks.
+
+### Metrics reported by model evaluation
+
+`msbgen.cli.evaluate` compares each reconstruction with the original image. The
+standard per-image scores are PSNR, SSIM, MAE and MSB consistency. LPIPS and DISTS
+are enabled with `--lpips` and `--dists`; patch KID is enabled with `--kid`. With
+multiple samples, the evaluator also reports PSNR of the sample mean and diversity.
+
+| Metric | What it measures | Better | Evaluation details |
+| --- | --- | :---: | --- |
+| MSE | **Mean squared pixel error**; the quantity used to calculate PSNR. | Lower | Available as a core function, but not printed as a separate column by the model evaluator. |
+| MAE | **Mean absolute pixel error** in intensity levels. | Lower | Reported per image and averaged across the test set. |
+| PSNR | **Peak signal-to-noise ratio**; Pixel-wise distortion relative to the image's full data range. | Higher | Reported in dB; uses `data_range = 2^n - 1`. |
+| SSIM | Local luminance, contrast and **structural similarity**. | Higher | Wang-style Gaussian-window SSIM; omitted with `--no-ssim` or for images smaller than 11×11. |
+| MSB consistency | Fraction of rounded output pixels whose top `k` bits match the transmitted input. | Higher | 1.0 means no transmitted-bit violations. This is a constraint check, not a perceptual-quality score. |
+| LPIPS | **Learned Perceptual Image Patch Similarity** Distance between deep AlexNet features of the reference and reconstruction. | Lower | Enabled with `--lpips`; grayscale images are replicated to three channels. |
+| DISTS | **Deep Image Structure and Texture Similarity**: more tolerant of plausible texture differences. | Lower | Enabled with `--dists`; grayscale images are replicated to three channels. |
+| KID | **Kernel Inception Distance**: Difference between distributions of Inception features from reference and reconstructed patches. | Lower | Enabled with `--kid`; default 128×128 patches, reported as KID × 1,000 in the CLI. It is a set-level score, not a per-image score. |
+| PSNR of sample mean | PSNR of the pixel-wise mean of multiple stochastic reconstructions. | Higher | Added when `--samples > 1`; it is not the mean PSNR of individual samples. |
+| Diversity | Mean per-pixel standard deviation across stochastic reconstructions. | Neither | Reported in image intensity levels; it measures sample variation, not quality. |
+| Time / image | Wall-clock time for one reconstruction. | Lower | Reported in seconds on the evaluation hardware; results depend on device and settings. |
+
+The evaluator always draws the first reconstruction and uses the same full-reference
+metrics for each method. For stochastic methods, `--samples N` draws `N` outputs;
+the PSNR-of-mean and diversity columns are only meaningful when `N > 1`. KID uses
+patches from every stochastic sample. LPIPS, DISTS and KID require their optional
+pretrained model dependencies and weights; they are not part of the lightweight
+core metric functions. FID is not currently reported.
+
+### Rate and distortion are separate
+
+Quality metrics above describe reconstruction distortion, not transmission cost.
+The analysis section's `bits_per_pixel` is the raw number of transmitted planes
+per pixel (for grayscale, `k`); `coded_bpp` is an entropy-based estimate. The rate
+CLI separately measures an actual lossless coded payload and its framed stream
+rate. Compare methods at the same `k` or actual bitrate to make a rate-distortion
+comparison. Timing is reported separately and is not a quality score.
 
 ### Functions
 

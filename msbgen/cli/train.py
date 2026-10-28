@@ -15,6 +15,8 @@ Presets (override any option after them):
                         Milestone 5: conditional Glow likelihood on fixed-size residual patches
     --preset hybrid     Milestone 6: residual U-Net -> flow matching -> diffusion refinement; use
                         --init-unet runs/unet-res/best.pt [--freeze-unet] to start from a trained U-Net
+    --preset vit        residual ViT regressor (patch tokens + global attention + conv fusion)
+    --preset vit-hybrid hybrid with a residual ViT as stage 1 (ViT -> flow matching -> diffusion refinement)
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ import argparse
 import sys
 from pathlib import Path
 
+VIT_ARGS = {"patch": 8, "dim": 192, "depth": 6, "heads": 6}
 PRESETS = {
     "cnn": {"arch": "cnn", "output": "direct", "arch_args": {"width": 64, "depth": 8}},
     "unet": {"arch": "unet", "output": "direct", "arch_args": {"width": 24, "levels": 4}},
@@ -34,6 +37,9 @@ PRESETS = {
     "normalizing-flow": {"kind": "normalizing_flow", "train": {"steps": 40_000, "val_every": 2_000}},
     "hybrid": {"kind": "hybrid", "arch_args": {"width": 32, "levels": 4, "blocks": 1},
                "train": {"steps": 40_000, "ema": 0.999, "val_every": 2_000}},
+    "vit": {"arch": "vit", "output": "residual", "arch_args": dict(VIT_ARGS), "train": {"steps": 40_000}},
+    "vit-hybrid": {"kind": "hybrid", "unet_arch": "vit", "arch_args": {"width": 32, "levels": 4, "blocks": 1},
+                   "train": {"steps": 40_000, "ema": 0.999, "val_every": 2_000}},
 }
 GENERATIVE = ("diffusion", "flow", "normalizing_flow", "hybrid")
 TRAIN_DEFAULTS = {"steps": 20_000, "ema": 0.0, "val_every": 1_000}
@@ -45,10 +51,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--preset", choices=PRESETS, help="preset (sets model kind, arch, output, size)")
     p.add_argument("--name", help="run name (default: the preset name); output goes to <out-dir>/<name>/")
     p.add_argument("--kind", choices=["regression", *GENERATIVE], help="model kind (default: from the preset)")
-    p.add_argument("--arch", choices=["cnn", "unet"], help="regression backbone")
+    p.add_argument("--arch", choices=["cnn", "unet", "vit"], help="regression backbone")
     p.add_argument("--output", choices=["direct", "residual"], help="regression output mode")
     p.add_argument("--width", type=int, help="channels (CNN) / first-level channels (U-Nets)")
-    p.add_argument("--depth", type=int, help="CNN layers")
+    p.add_argument("--depth", type=int, help="CNN layers / ViT transformer blocks")
+    p.add_argument("--patch", type=int, help="ViT patch size (default 8)")
+    p.add_argument("--dim", type=int, help="ViT token width (default 192)")
+    p.add_argument("--heads", type=int, help="ViT attention heads (default 6)")
+    p.add_argument("--unet-arch", choices=["unet", "vit"], help="hybrid: stage-1 backbone (default unet)")
     p.add_argument("--levels", type=int, help="U-Net downsampling levels")
     p.add_argument("--blocks", type=int, help="generative models: ResBlocks per resolution")
     p.add_argument("--crop-size", type=int, help="normalizing flow: fixed patch size (default: --crop)")
@@ -121,8 +131,8 @@ def main(argv: list[str] | None = None) -> int:
         options = ()
     else:
         arch = args.arch or base["arch"]
-        arch_args = dict(base["arch_args"]) if arch == base["arch"] else {}
-        options = ("width", "depth", "levels")
+        arch_args = dict(base["arch_args"]) if arch == base["arch"] else (dict(VIT_ARGS) if arch == "vit" else {})
+        options = ("patch", "dim", "depth", "heads") if arch == "vit" else ("width", "depth", "levels")
     for key in options:
         if getattr(args, key) is not None:
             arch_args[key] = getattr(args, key)
@@ -141,14 +151,20 @@ def main(argv: list[str] | None = None) -> int:
         elif kind == "flow":
             model = FlowConfig(k=args.k, arch_args=arch_args, solver=args.solver or "euler", **sampler)
         elif kind == "hybrid":
-            unet_args = {"width": 24, "levels": 4}
+            unet_arch = args.unet_arch or base.get("unet_arch", "unet")
+            unet_args = dict(VIT_ARGS) if unet_arch == "vit" else {"width": 24, "levels": 4}
+            if unet_arch == "vit":
+                unet_args.update({key: getattr(args, key) for key in ("patch", "dim", "depth", "heads")
+                                  if getattr(args, key) is not None})
             if args.init_unet:
                 from msbgen.models.checkpoint import read_checkpoint
 
-                unet_args = read_checkpoint(args.init_unet)["model_config"]["arch_args"]
+                init_cfg = read_checkpoint(args.init_unet)["model_config"]
+                unet_arch, unet_args = init_cfg["arch"], init_cfg["arch_args"]
             extra = {key: getattr(args, key) for key in ("refine_steps", "refine_t", "unet_weight")
                      if getattr(args, key) is not None}
-            model = HybridConfig(k=args.k, arch_args=arch_args, unet_args=unet_args, **extra, **sampler)
+            model = HybridConfig(k=args.k, arch_args=arch_args, unet_arch=unet_arch, unet_args=unet_args,
+                                 **extra, **sampler)
         elif kind == "normalizing_flow":
             model = NormalizingFlowConfig(
                 k=args.k, crop_size=args.crop_size if args.crop_size is not None else args.crop,

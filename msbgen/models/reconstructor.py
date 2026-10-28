@@ -84,7 +84,7 @@ class ModelReconstructor(_CheckpointReconstructor):
     def __init__(self, checkpoint: Path, device: str | torch.device | None = None,
                  name: str | None = None, tile: int = 512, margin: int = 64):
         super().__init__(checkpoint, device, name, tile, margin)
-        arch = "U-Net" if self.config.arch == "unet" else "CNN"
+        arch = {"unet": "U-Net", "vit": "ViT"}.get(self.config.arch, "CNN")
         self.label = f"{arch} ({self.config.output})"
 
     @torch.no_grad()
@@ -225,8 +225,9 @@ class HybridReconstructor(_CheckpointReconstructor):
         self.eta = c.eta if eta is None else eta
         self.seed, self.on_step = seed, on_step
         self.stochastic = self.steps > 0 or self.refine_steps > 0
-        self.label = (("Hybrid (U-Net only)" if self.steps == 0 else "Hybrid (U-Net + flow)")
-                      if self.refine_steps == 0 else "Hybrid (U-Net + flow + diffusion)")
+        s1 = "ViT" if c.unet_arch == "vit" else "U-Net"
+        self.label = ((f"Hybrid ({s1} only)" if self.steps == 0 else f"Hybrid ({s1} + flow)")
+                      if self.refine_steps == 0 else f"Hybrid ({s1} + flow + diffusion)")
 
     @property
     def sampler(self) -> dict:
