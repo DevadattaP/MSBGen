@@ -66,7 +66,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--blocks-per-scale", type=int, help="normalizing flow: Glow blocks per scale (default 4)")
     p.add_argument("--condition-width", type=int, help="normalizing flow: B7 feature width (default 32)")
     p.add_argument("--hidden-width", type=int, help="normalizing flow: coupling subnet width (default 64)")
-    p.add_argument("--k", type=int, default=1, help="number of transmitted MSB planes (default 1)")
+    p.add_argument("--k", type=int, default=1, help="number of transmitted MSB planes per channel (default 1)")
+    p.add_argument("--color", choices=["auto", "gray", "rgb"], default="auto",
+                   help="image channels the model is built for; auto reads them from the --train data")
     p.add_argument("--train", nargs="+", default=["data/processed/div2k-train"], help="training folders of .npy")
     p.add_argument("--val", nargs="+", default=["data/processed/div2k-valid"], help="validation folders of .npy")
     p.add_argument("--out-dir", default="runs")
@@ -139,6 +141,15 @@ def main(argv: list[str] | None = None) -> int:
     name = args.name or args.preset
     if not name:
         p.error("give --name or --preset")
+    if args.color == "auto":
+        from msbgen.data.crops import dataset_channels
+
+        try:
+            channels = dataset_channels([Path(d) for d in args.train])
+        except FileNotFoundError as exc:
+            p.error(str(exc))
+    else:
+        channels = {"gray": 1, "rgb": 3}[args.color]
     train_opts = {**TRAIN_DEFAULTS, **base.get("train", {})}
     for key in train_opts:
         if getattr(args, key) is not None:
@@ -147,9 +158,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         sampler = {"sample_steps": args.sample_steps} if args.sample_steps is not None else {}
         if kind == "diffusion":
-            model = DiffusionConfig(k=args.k, arch_args=arch_args, **sampler)
+            model = DiffusionConfig(k=args.k, channels=channels, arch_args=arch_args, **sampler)
         elif kind == "flow":
-            model = FlowConfig(k=args.k, arch_args=arch_args, solver=args.solver or "euler", **sampler)
+            model = FlowConfig(k=args.k, channels=channels, arch_args=arch_args, solver=args.solver or "euler", **sampler)
         elif kind == "hybrid":
             unet_arch = args.unet_arch or base.get("unet_arch", "unet")
             unet_args = dict(VIT_ARGS) if unet_arch == "vit" else {"width": 24, "levels": 4}
@@ -163,18 +174,19 @@ def main(argv: list[str] | None = None) -> int:
                 unet_arch, unet_args = init_cfg["arch"], init_cfg["arch_args"]
             extra = {key: getattr(args, key) for key in ("refine_steps", "refine_t", "unet_weight")
                      if getattr(args, key) is not None}
-            model = HybridConfig(k=args.k, arch_args=arch_args, unet_arch=unet_arch, unet_args=unet_args,
-                                 **extra, **sampler)
+            model = HybridConfig(k=args.k, channels=channels, arch_args=arch_args, unet_arch=unet_arch,
+                                 unet_args=unet_args, **extra, **sampler)
         elif kind == "normalizing_flow":
             model = NormalizingFlowConfig(
-                k=args.k, crop_size=args.crop_size if args.crop_size is not None else args.crop,
+                k=args.k, channels=channels, crop_size=args.crop_size if args.crop_size is not None else args.crop,
                 scales=args.scales if args.scales is not None else 4,
                 blocks_per_scale=args.blocks_per_scale if args.blocks_per_scale is not None else 4,
                 condition_width=args.condition_width if args.condition_width is not None else 32,
                 hidden_width=args.hidden_width if args.hidden_width is not None else 64,
             )
         else:
-            model = ModelConfig(arch=arch, output=args.output or base["output"], k=args.k, arch_args=arch_args)
+            model = ModelConfig(arch=arch, output=args.output or base["output"], k=args.k, channels=channels,
+                                arch_args=arch_args)
         thermal = ThermalLimits(args.gpu_max_temp, args.gpu_resume_temp, args.cpu_max_temp, args.cpu_resume_temp)
     except ValueError as exc:
         p.error(str(exc))

@@ -2,7 +2,7 @@
 
     python -m msbgen.cli.evaluate data/processed/kodak --models runs/*/best.pt --lpips --dists --kid
 
-Every method receives only the top-k bits of each image (8-bit grayscale) and is
+Every method receives only the top-k bits of each image channel (8-bit grayscale or RGB) and is
 scored against the original with PSNR, SSIM, MAE, MSB consistency and, with
 --lpips / --dists, LPIPS / DISTS. `time_s` is the time to produce one reconstruction.
 
@@ -50,8 +50,9 @@ METRICS = ["psnr", "ssim", "lpips", "dists", "mae", "msb_consistency", "psnr_avg
 STD_GAIN = 4  # the std map in the sample strips is scaled by this, like the web app's error maps
 
 
-def load_test_images(folder: Path, limit: int | None = None) -> list[tuple[str, np.ndarray]]:
-    """(name, (H, W) uint8) pairs from prepared .npy files or ordinary image files."""
+def load_test_images(folder: Path, limit: int | None = None, rgb: bool = False) -> list[tuple[str, np.ndarray]]:
+    """(name, (H, W) or (H, W, 3) uint8) pairs from prepared .npy files (as stored) or ordinary
+    image files (grayscale, or RGB with `rgb`)."""
     arrays = sorted(folder.glob("*.npy"))
     if arrays:
         return [(p.stem, np.load(p)) for p in arrays[:limit]]
@@ -61,7 +62,9 @@ def load_test_images(folder: Path, limit: int | None = None) -> list[tuple[str, 
         if loaded.bit_depth != 8:
             print(f"skipped {p.name}: {loaded.bit_depth}-bit", file=sys.stderr)
             continue
-        images.append((p.stem, to_grayscale(loaded.array)[..., 0]))
+        images.append((p.stem, (loaded.array if loaded.array.shape[-1] == 3
+                                else np.repeat(loaded.array, 3, axis=-1)) if rgb
+                       else to_grayscale(loaded.array)[..., 0]))
     return images
 
 
@@ -74,12 +77,12 @@ def comparison_strip(tiles: list[tuple[str, np.ndarray]], height: int = 320) -> 
         w = round(img.width * height / img.height)
         scaled.append((title, img.resize((w, height), Image.Resampling.LANCZOS)))
     width = sum(img.width for _, img in scaled) + pad * (len(scaled) + 1)
-    canvas = Image.new("L", (width, height + label_h + 2 * pad), 255)
+    canvas = Image.new("RGB" if scaled[0][1].mode == "RGB" else "L", (width, height + label_h + 2 * pad), 255)
     draw = ImageDraw.Draw(canvas)
     x = pad
     for title, img in scaled:
         canvas.paste(img, (x, pad + label_h))
-        draw.text((x, pad + 4), title, fill=0)
+        draw.text((x, pad + 4), title, fill=(0, 0, 0) if canvas.mode == "RGB" else 0)
         x += img.width + pad
     return canvas
 
@@ -105,6 +108,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dists", action="store_true", help="also compute DISTS (needs `piq`)")
     p.add_argument("--kid", action="store_true", help="also compute patch KID per method (needs `piq`)")
     p.add_argument("--kid-patch", type=int, default=128, metavar="PX", help="KID patch size (default 128)")
+    p.add_argument("--color", choices=["gray", "rgb"], default="gray",
+                   help="how to load plain image files (prepared .npy files keep their stored channels)")
     p.add_argument("--no-ssim", action="store_true")
     p.add_argument("--limit", type=int, help="evaluate only the first N images")
     p.add_argument("--save-images", type=int, default=4, metavar="N", help="save outputs for the first N images (default 4)")
@@ -114,9 +119,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="don't pause when the GPU/CPU is hot (default limits as in train)")
     args = p.parse_args(argv)
 
-    images = load_test_images(args.data, args.limit)
+    images = load_test_images(args.data, args.limit, args.color == "rgb")
     if not images:
         p.error(f"no images in {args.data}")
+    channels = 1 if images[0][1].ndim == 2 else images[0][1].shape[-1]
     if args.samples < 1:
         p.error("--samples must be at least 1")
     if args.kid_patch < 16:
@@ -135,8 +141,9 @@ def main(argv: list[str] | None = None) -> int:
             model = load_reconstructor(path, device=args.device, steps=args.sample_steps, eta=args.eta,
                                        solver=args.solver, refine_steps=args.refine_steps,
                                        refine_t=args.refine_t, on_step=guard.check)
-            if not model.supports(args.k, n, 1):
-                print(f"skipped {path}: trained for k={model.config.k}", file=sys.stderr)
+            if not model.supports(args.k, n, channels):
+                print(f"skipped {path}: trained for k={model.config.k}, {model.config.channels} channel(s)",
+                      file=sys.stderr)
                 continue
             methods.append(model)
             if args.hybrid_ablation and model.model.kind == "hybrid":
@@ -149,8 +156,8 @@ def main(argv: list[str] | None = None) -> int:
 
         for folder in args.bitdepth_models:
             bitplane = BitplaneReconstructor(folder, device=args.device)
-            if not bitplane.supports(args.k, n, 1):
-                print(f"skipped {folder}: missing bit_NN.pt for k={args.k}", file=sys.stderr)
+            if not bitplane.supports(args.k, n, channels):
+                print(f"skipped {folder}: missing bit_NN.pt for k={args.k} or wrong channel count", file=sys.stderr)
                 continue
             methods.append(bitplane)
     names = [m.name for m in methods]
@@ -246,7 +253,8 @@ def main(argv: list[str] | None = None) -> int:
         if hasattr(method, "sampler"):
             entry.update(method.sampler)
         summary[method.name] = entry
-    meta = {"data": str(args.data), "images": len(images), "k": args.k, "bit_depth": n, "samples": args.samples}
+    meta = {"data": str(args.data), "images": len(images), "k": args.k, "bit_depth": n,
+            "channels": channels, "samples": args.samples}
     if args.kid:
         meta["kid_patch"] = args.kid_patch
     (out / "summary.json").write_text(json.dumps({"meta": meta, "methods": summary}, indent=2))

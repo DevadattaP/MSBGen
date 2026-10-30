@@ -5,6 +5,7 @@ Layout under the data root (default `data/`, git-ignored):
     raw/<download files>                     archives / original images, kept for re-runs
     raw/<extracted_dir>/                     extracted archive contents
     processed/<name>/<image stem>.npy        (H, W) uint8 grayscale (BT.601 luma)
+    processed/<name>-rgb/<image stem>.npy    (H, W, 3) uint8 RGB, with `color="rgb"`
     processed/<name>/manifest.json           provenance + list of files and shapes
 
 Every step is skipped when its output already exists, so re-running is cheap and an
@@ -84,8 +85,8 @@ def extract(archive: Path, dest_dir: Path, expected_dir: str) -> Path:
     return target
 
 
-def convert(images: list[Path], out_dir: Path, source: Source) -> dict:
-    """Convert images to grayscale .npy and write the manifest."""
+def convert(images: list[Path], out_dir: Path, source: Source, color: str = "gray") -> dict:
+    """Convert images to grayscale (or RGB) .npy and write the manifest."""
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = out_dir / "manifest.json"
     if manifest_path.exists():
@@ -107,9 +108,12 @@ def convert(images: list[Path], out_dir: Path, source: Source) -> dict:
             if loaded.bit_depth != 8:
                 print(f"\n  skipped {path.name}: {loaded.bit_depth}-bit", file=sys.stderr)
                 continue
-            gray = to_grayscale(loaded.array)[..., 0]
-            np.save(out, np.ascontiguousarray(gray))
-            shape = list(gray.shape)
+            if color == "rgb":
+                array = loaded.array if loaded.array.shape[-1] == 3 else np.repeat(loaded.array[..., :1], 3, axis=-1)
+            else:
+                array = to_grayscale(loaded.array)[..., 0]
+            np.save(out, np.ascontiguousarray(array))
+            shape = list(array.shape)
         files.append({"file": out.name, "source": path.name, "shape": shape})
         print(f"\r  converting {source.name}: {i}/{len(images)}", end="", file=sys.stderr, flush=True)
     print(file=sys.stderr)
@@ -119,7 +123,8 @@ def convert(images: list[Path], out_dir: Path, source: Source) -> dict:
         "description": source.description,
         "citation": source.citation,
         "urls": [d.url for d in source.downloads],
-        "format": "(H, W) uint8 grayscale, ITU-R BT.601 luma (as Pillow 'L'), no resizing",
+        "format": "(H, W, 3) uint8 RGB, no resizing" if color == "rgb"
+        else "(H, W) uint8 grayscale, ITU-R BT.601 luma (as Pillow 'L'), no resizing",
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "count": len(files),
         "pixels": int(sum(f["shape"][0] * f["shape"][1] for f in files)),
@@ -129,7 +134,11 @@ def convert(images: list[Path], out_dir: Path, source: Source) -> dict:
     return manifest
 
 
-def prepare(source: Source, root: Path, keep_raw: bool = True) -> dict:
+def processed_name(source: Source, color: str = "gray") -> str:
+    return f"{source.name}-rgb" if color == "rgb" else source.name
+
+
+def prepare(source: Source, root: Path, keep_raw: bool = True, color: str = "gray") -> dict:
     raw = root / "raw"
     print(f"[{source.name}] {source.description}", file=sys.stderr)
     paths = [download(d, raw if source.archive else raw / source.name) for d in source.downloads]
@@ -138,7 +147,7 @@ def prepare(source: Source, root: Path, keep_raw: bool = True) -> dict:
         images = sorted(folder.glob(source.image_glob))
     else:
         images = paths
-    manifest = convert(images, root / "processed" / source.name, source)
+    manifest = convert(images, root / "processed" / processed_name(source, color), source, color)
     if not keep_raw:
         for p in paths:
             p.unlink(missing_ok=True)

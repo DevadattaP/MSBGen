@@ -21,6 +21,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("datasets", nargs="*", default=["div2k", "kodak"],
                         help="dataset names or groups (default: div2k kodak); see --list")
     parser.add_argument("--root", type=Path, default=Path("data"), help="data folder (default: data)")
+    parser.add_argument("--color", choices=["gray", "rgb"], default="gray",
+                        help="gray: (H, W) luma into processed/<name>; rgb: (H, W, 3) into processed/<name>-rgb")
     parser.add_argument("--delete-raw", action="store_true", help="delete downloads after conversion")
     parser.add_argument("--list", action="store_true", help="list available datasets and exit")
     args = parser.parse_args(argv)
@@ -37,16 +39,16 @@ def main(argv: list[str] | None = None) -> int:
     except KeyError as exc:
         parser.error(str(exc.args[0]))
 
-    from msbgen.data.prepare import prepare
+    from msbgen.data.prepare import prepare, processed_name
 
     for source in sources:
         try:
-            manifest = prepare(source, args.root, keep_raw=not args.delete_raw)
+            manifest = prepare(source, args.root, keep_raw=not args.delete_raw, color=args.color)
         except OSError as exc:
             print(f"[{source.name}] failed: {exc}", file=sys.stderr)
             return 1
         print(f"[{source.name}] {manifest['count']} images, {manifest['pixels'] / 1e6:.0f} MP → "
-              f"{args.root / 'processed' / source.name}")
+              f"{args.root / 'processed' / processed_name(source, args.color)}")
     return 0
 
 

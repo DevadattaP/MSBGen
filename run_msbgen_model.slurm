@@ -46,47 +46,73 @@ print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N
 "
 
 echo
-echo "Starting MSBGen model run..."
+echo "Starting MSBGen RGB run..."
 date
 
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 
-for k in 1 2 3; do
-  if [ "$k" -eq 1 ]; then s=""; else s="-k${k}"; fi
+# Usage: sbatch --export=ALL,KS="1" run_msbgen_model.slurm   (one k per job fits the time limit)
+KS=${KS:-"1 2 3"}
+R=runs/rgb
+TRAIN=data/processed/div2k-train-rgb
+VAL=data/processed/div2k-valid-rgb
+TEST=data/processed/kodak-rgb
+COMMON="--train $TRAIN --val $VAL --out-dir $R --device cuda --no-thermal-guard"
 
-  python -m msbgen.cli.train --preset vit --name vit${s} --k "$k" \
-    --device cuda --no-thermal-guard
+# RGB data: (H, W, 3) arrays in data/processed/<name>-rgb (gray data is untouched)
+python -m msbgen.cli.prepare_data div2k kodak --color rgb
 
-  python -m msbgen.cli.evaluate data/processed/kodak --k "$k" \
-    --models runs/cnn${s}/best.pt runs/unet${s}/best.pt runs/unet-res${s}/best.pt \
-             runs/diffusion${s}/best.pt runs/flow${s}/best.pt runs/hybrid${s}/best.pt \
-             runs/vit${s}/best.pt \
-    --bitdepth-models runs/bitdepth-d4 --hybrid-ablation \
-    --lpips --dists --kid --samples 8 --sample-steps 3 --save-images 4 \
-    --out outputs/eval/kodak-vit-k${k} --device cuda --no-thermal-guard
+# Train one model; continue from last.pt when the job was cut off
+train_model() {  # name, then extra train args
+  local name=$1; shift
+  local resume=""
+  [ -f "$R/$name/last.pt" ] && resume="--resume $R/$name/last.pt"
+  python -m msbgen.cli.train --name "$name" $COMMON $resume "$@"
+}
 
-  python -m msbgen.cli.plot_eval outputs/eval/kodak-vit-k${k} \
-    --pair vit${s} unet-res${s} --out outputs/plots/vit-k${k}
+# Sequential bit-plane CNNs (paper approach), one per missing plane, 3 channels each (k independent)
+for b in 1 2 3 4 5 6 7; do
+  if [ ! -f "$R/bitdepth-d4/bit_0${b}.pt" ]; then
+    python -m msbgen.cli.bitdepth train --input-bits "$b" --train $TRAIN --val $VAL \
+      --out $R/bitdepth-d4 --augment --device cuda --no-thermal-guard
+  fi
 done
 
-for k in 1 2 3; do
+for k in $KS; do
   if [ "$k" -eq 1 ]; then s=""; else s="-k${k}"; fi
 
-  python -m msbgen.cli.train --preset vit-hybrid --name vit-hybrid${s} --k "$k" \
-    --device cuda --no-thermal-guard
+  train_model cnn${s}              --preset cnn --k "$k"
+  train_model unet${s}             --preset unet --k "$k"
+  train_model unet-res${s}         --preset unet-res --k "$k"
+  train_model normalizing-flow${s} --preset normalizing-flow --k "$k"
+  train_model flow${s}             --preset flow --k "$k"
+  train_model diffusion${s}        --preset diffusion --k "$k"
+  train_model vit${s}              --preset vit --k "$k"
+  train_model hybrid${s}           --preset hybrid --k "$k"
+  train_model vit-hybrid${s}       --preset vit-hybrid --k "$k"
 
-  python -m msbgen.cli.evaluate data/processed/kodak --k "$k" \
-    --models runs/cnn${s}/best.pt runs/unet${s}/best.pt runs/unet-res${s}/best.pt \
-             runs/diffusion${s}/best.pt runs/flow${s}/best.pt runs/hybrid${s}/best.pt \
-             runs/vit${s}/best.pt runs/vit-hybrid${s}/best.pt \
-    --bitdepth-models runs/bitdepth-d4 --hybrid-ablation \
+  python -m msbgen.cli.evaluate $TEST --k "$k" \
+    --models $R/cnn${s}/best.pt $R/unet${s}/best.pt $R/unet-res${s}/best.pt \
+             $R/vit${s}/best.pt $R/normalizing-flow${s}/best.pt $R/flow${s}/best.pt \
+             $R/diffusion${s}/best.pt $R/hybrid${s}/best.pt $R/vit-hybrid${s}/best.pt \
+    --bitdepth-models $R/bitdepth-d4 --hybrid-ablation \
     --lpips --dists --kid --samples 8 --sample-steps 3 --save-images 4 \
-    --out outputs/eval/kodak-vit-hybrid-k${k} --device cuda --no-thermal-guard
+    --out outputs/rgb/eval/kodak-k${k} --device cuda --no-thermal-guard
 
-  python -m msbgen.cli.plot_eval outputs/eval/kodak-vit-hybrid-k${k} \
-    --pair vit-hybrid${s} hybrid${s} --out outputs/plots/vit-hybrid-k${k}
+  python -m msbgen.cli.plot_eval outputs/rgb/eval/kodak-k${k} \
+    --pair vit-hybrid${s} hybrid${s} --out outputs/rgb/plots/k${k}
+
+  python -m msbgen.cli.plot_runs $R/cnn${s} $R/unet${s} $R/unet-res${s} $R/vit${s} \
+    $R/normalizing-flow${s} $R/flow${s} $R/diffusion${s} $R/hybrid${s} $R/vit-hybrid${s} \
+    --out outputs/rgb/plots/runs-k${k}
 done
+
+# Bit-depth recovery on its own (start bits 1..7 -> 8), RGB
+python -m msbgen.cli.bitdepth evaluate --models $R/bitdepth-d4 --test $TEST \
+  --start-bits 1 2 3 4 5 6 7 --save-images --out outputs/rgb/bitdepth/kodak --device cuda
+python -m msbgen.cli.bitdepth plot outputs/rgb/bitdepth/kodak/evaluation.csv \
+  --out outputs/rgb/bitdepth/kodak/recovery.png
 
 sync
 echo "=== Done: $(date)"

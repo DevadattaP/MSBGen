@@ -247,7 +247,7 @@ class HybridReconstructor(_CheckpointReconstructor):
 
 
 class BitplaneReconstructor(Reconstructor):
-    """The paper-style sequential bitplane CNNs (`runs/bitdepth-*/bit_NN.pt`): top k bits -> 8 bits."""
+    """The paper-style sequential bitplane CNNs (`runs/bitdepth-*/bit_NN.pt`): top k bits -> 8 bits (gray or RGB)."""
 
     def __init__(self, folder: Path, device: str | torch.device | None = None, name: str | None = None):
         self.folder = Path(folder)
@@ -260,7 +260,9 @@ class BitplaneReconstructor(Reconstructor):
         return self.folder / f"bit_{bits:02d}.pt"
 
     def supports(self, k: int, bit_depth: int, channels: int) -> bool:
-        return channels == 1 and all(self._path(b).exists() for b in range(k, bit_depth))
+        if not all(self._path(b).exists() for b in range(k, bit_depth)):
+            return False
+        return all(self._model(b).config["channels"] == channels for b in range(k, bit_depth))
 
     def _model(self, bits: int) -> torch.nn.Module:
         if bits not in self._models:
@@ -275,7 +277,7 @@ class BitplaneReconstructor(Reconstructor):
         maximum = float((1 << bit_depth) - 1)
         source = _to_tensor(top) / maximum
         out = recover_bitplanes(source, [self._model(b) for b in range(k, bit_depth)], k, bit_depth, self.device)
-        return out[0, 0].cpu().double().numpy() * maximum
+        return _to_estimate(out, maximum, top)
 
 
 SAMPLER_OPTIONS = {"diffusion": ("steps", "eta"), "flow": ("steps", "solver"), "normalizing_flow": (),

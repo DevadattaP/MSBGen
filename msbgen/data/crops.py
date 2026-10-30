@@ -1,4 +1,6 @@
-"""PyTorch datasets of grayscale crops from `prepare_data` output (`*.npy`, uint8 (H, W)).
+"""PyTorch datasets of crops from `prepare_data` output (`*.npy`, uint8 (H, W) gray or (H, W, 3) RGB).
+
+Crops come out as (C, crop, crop), C = 1 or 3.
 
 Images are memory-mapped, so only the cropped pixels are read from disk; an 800-image
 DIV2K set does not need to fit in RAM. The datasets return raw uint8 crops; the model
@@ -27,6 +29,12 @@ def list_arrays(folder: Path) -> list[Path]:
     return files
 
 
+def dataset_channels(folders: list[Path]) -> int:
+    """Channels of the prepared images: 1 for (H, W) arrays, 3 for (H, W, 3)."""
+    shape = np.load(list_arrays(Path(folders[0]))[0], mmap_mode="r").shape
+    return 1 if len(shape) == 2 else shape[2]
+
+
 class RandomCrops(Dataset):
     """Random `crop`×`crop` patches with random flips / 90° rotations.
 
@@ -38,7 +46,7 @@ class RandomCrops(Dataset):
     def __init__(self, folders: list[Path], crop: int = 128, samples: int = 16_000, augment: bool = True, seed: int = 0):
         self.files = [f for folder in folders for f in list_arrays(Path(folder))]
         shapes = [np.load(f, mmap_mode="r").shape for f in self.files]
-        keep = [i for i, s in enumerate(shapes) if min(s) >= crop]
+        keep = [i for i, s in enumerate(shapes) if min(s[:2]) >= crop]
         if not keep:
             raise ValueError(f"no image is at least {crop}×{crop}")
         self.files = [self.files[i] for i in keep]
@@ -66,7 +74,8 @@ class RandomCrops(Dataset):
             patch = np.rot90(patch, int(rng.integers(4)))
             if rng.integers(2):
                 patch = patch[:, ::-1]
-        return torch.from_numpy(np.ascontiguousarray(patch))[None]  # (1, crop, crop) uint8
+        patch = torch.from_numpy(np.ascontiguousarray(patch))
+        return patch[None] if patch.ndim == 2 else patch.permute(2, 0, 1)  # (C, crop, crop) uint8
 
 
 class CenterCrops(Dataset):
@@ -81,6 +90,7 @@ class CenterCrops(Dataset):
 
     def __getitem__(self, index: int) -> torch.Tensor:
         img = np.load(self.files[index], mmap_mode="r")
-        c = min(self.crop, *img.shape)
+        c = min(self.crop, *img.shape[:2])
         y, x = (img.shape[0] - c) // 2, (img.shape[1] - c) // 2
-        return torch.from_numpy(np.ascontiguousarray(img[y : y + c, x : x + c]))[None]
+        patch = torch.from_numpy(np.ascontiguousarray(img[y : y + c, x : x + c]))
+        return patch[None] if patch.ndim == 2 else patch.permute(2, 0, 1)

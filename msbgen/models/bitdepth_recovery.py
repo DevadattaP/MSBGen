@@ -110,9 +110,7 @@ class BitplaneDataset(Dataset):
             tensor = tensor.permute(2, 0, 1)
         if tensor.ndim != 3:
             raise ValueError(f"expected HW, HWC, or CHW image, got {tuple(tensor.shape)}")
-        if not tensor.is_floating_point():
-            tensor = tensor.float() / ((1 << bit_depth) - 1)
-        return tensor.float().clamp(0, 1)
+        return tensor  # integers stay compact; `__getitem__` scales the patch
 
     def __len__(self) -> int:
         return len(self.index)
@@ -121,6 +119,10 @@ class BitplaneDataset(Dataset):
         image_index, y, x = self.index[item]
         image = self.images[image_index]
         patch = image[:, y : y + self.patch_size, x : x + self.patch_size]
+        patch = patch.float()
+        if not image.is_floating_point():
+            patch = patch / ((1 << self.bit_depth) - 1)
+        patch = patch.clamp(0, 1)
         if self.augment:
             generator = torch.Generator().manual_seed(item)
             if torch.rand((), generator=generator) < 0.5:

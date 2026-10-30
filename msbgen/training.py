@@ -57,7 +57,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from msbgen.core.metrics import ssim
-from msbgen.data.crops import CenterCrops, RandomCrops
+from msbgen.data.crops import CenterCrops, RandomCrops, dataset_channels
 from msbgen.models.checkpoint import GENERATIVE_KINDS, ModelConfigs, Models, build_model, read_checkpoint, save_checkpoint
 from msbgen.models.msb_net import ModelConfig
 from msbgen.utils.thermal import ThermalGuard, ThermalLimits
@@ -165,7 +165,8 @@ def validate(model: Models, loader: DataLoader, device: torch.device, loss_fn=F.
         ref = x.cpu().numpy()
         for name, est in estimates.items():
             psnrs[name].append(_psnr_per_image(est, target))
-            ssims[name] += [ssim(r[0], e[0], peak) for r, e in zip(ref, (est * peak).cpu().numpy())]
+            ssims[name] += [ssim(np.moveaxis(r, 0, -1), np.moveaxis(e, 0, -1), peak)
+                            for r, e in zip(ref, (est * peak).cpu().numpy())]
         rounded = torch.floor(pred * peak + 0.5).clamp(0, peak)
         consistent.append((keep_top_bits_t(rounded, k, n) == top).float().flatten(1).mean(1))
     model.train(was_training)
@@ -219,6 +220,10 @@ def train(cfg: TrainConfig, resume: Path | None = None) -> Path:
     torch.backends.cudnn.benchmark = True
 
     run_dir = cfg.run_dir
+    for folders in (cfg.train_dirs, cfg.val_dirs):
+        data_channels = dataset_channels([Path(d) for d in folders])
+        if data_channels != cfg.model.channels:
+            raise ValueError(f"model has {cfg.model.channels} channel(s) but {folders[0]} has {data_channels}")
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "config.json").write_text(json.dumps(cfg.to_dict(), indent=2))
 
