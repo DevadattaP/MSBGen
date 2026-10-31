@@ -194,6 +194,27 @@ def to_grayscale(array: np.ndarray) -> np.ndarray:
     return np.rint(luma).astype(array.dtype)[..., np.newaxis]
 
 
+def convert_color_mode(loaded: LoadedImage, color_mode: str | None) -> LoadedImage:
+    """Convert a decoded image to the selected mode while preserving bit depth and metadata."""
+    if color_mode is None or color_mode == loaded.color_mode:
+        return loaded
+    if color_mode not in {"L", "RGB"}:
+        raise ValueError("color_mode must be 'L' or 'RGB'")
+    if color_mode == "L":
+        array = to_grayscale(loaded.array)
+    else:
+        array = np.repeat(loaded.array, 3, axis=-1)
+    return LoadedImage(
+        array,
+        color_mode,
+        loaded.bit_depth,
+        to_preview(array, loaded.bit_depth),
+        loaded.original_mode,
+        loaded.original_format,
+        [*loaded.notes, f"Converted image to {color_mode} mode."],
+    )
+
+
 def to_preview(array: np.ndarray, bit_depth: int) -> np.ndarray:
     """8-bit version of an (H, W, 1) or (H, W, 3) array for display only."""
     if bit_depth == 16:

@@ -31,6 +31,7 @@ def test_index_served():
     res = client.get("/")
     assert res.status_code == 200
     assert "MSBGen" in res.text
+    assert 'id="evals"' not in res.text
 
 
 def test_health():
@@ -56,6 +57,20 @@ def test_rgb_returns_24_planes():
     assert len(body["planes"]) == 24
     assert (body["width"], body["height"]) == (12, 10)
     assert body["notes"] == []
+
+
+def test_bitplanes_follow_selected_color_mode():
+    arr = np.zeros((8, 10, 3), dtype=np.uint8)
+    arr[..., 0], arr[..., 1], arr[..., 2] = 255, 0, 0
+    png = _encode(Image.fromarray(arr, "RGB"))
+
+    gray = client.post("/api/bitplanes", files={"file": ("x.png", png)}, data={"color_mode": "L"}).json()
+    rgb = client.post("/api/bitplanes", files={"file": ("x.png", png)}, data={"color_mode": "RGB"}).json()
+
+    assert gray["color_mode"] == "L" and len(gray["planes"]) == 8
+    assert rgb["color_mode"] == "RGB" and len(rgb["planes"]) == 24
+    analysis = client.post("/api/analysis", files={"file": ("x.png", png)}, data={"color_mode": "L"}).json()
+    assert analysis["color_mode"] == "L" and len(analysis["planes"]) == 8
 
 
 def test_rgba_drops_alpha_keeps_rgb_values():
@@ -229,7 +244,9 @@ def _use_models_dir(monkeypatch, path, **overrides):
 
     # No LPIPS / DISTS unless a test asks: the real ones download network weights.
     overrides = {"perceptual": False, "eval_dir": path / "eval", **overrides}
-    patched = dataclasses.replace(settings, models_dir=path, device="cpu", **overrides)
+    patched = dataclasses.replace(
+        settings, models_dir=path, bitdepth_models_dir=path, device="cpu", **overrides
+    )
     monkeypatch.setattr(model_registry, "settings", patched)
     monkeypatch.setattr(routes, "settings", patched)
 
@@ -295,8 +312,8 @@ def test_models_and_reconstruct(tmp_path, monkeypatch):
     assert [(m["name"], m["k"], m["step"], m["val_gain_db"]) for m in models] == [("tiny-unet", 1, 5, 1.5)]
 
     arr = np.random.default_rng(3).integers(0, 256, (24, 20, 3), dtype=np.uint8)
-    body = _post_reconstruct(_encode(Image.fromarray(arr, "RGB")))
-    assert any("grayscale" in n for n in body["notes"])
+    body = _post_reconstruct(_encode(Image.fromarray(arr, "RGB")), color_mode="L")
+    assert body["color_mode"] == "L"
     assert [r["name"] for r in body["results"]] == ["zero", "mid", "random", "tiny-unet"]
     zero, mid, random, model = body["results"]
     assert mid["psnr_gain"] == 0 and mid["msb_consistency"] == 1.0
@@ -304,6 +321,66 @@ def test_models_and_reconstruct(tmp_path, monkeypatch):
     assert model["kind"] == "model" and model["msb_consistency"] == 1.0
     assert zero["psnr_gain"] < 0
     assert _decode_data_url(body["original"]).shape == (24, 20, 3)
+
+
+def test_reconstruct_preserves_selected_rgb_mode(tmp_path, monkeypatch):
+    _use_models_dir(monkeypatch, tmp_path)
+    arr = np.random.default_rng(4).integers(0, 256, (16, 20, 3), dtype=np.uint8)
+    body = _post_reconstruct(_encode(Image.fromarray(arr, "RGB")), color_mode="RGB")
+    assert body["color_mode"] == "RGB"
+    assert [channel["name"] for channel in body["channels"]] == ["R", "G", "B"]
+    assert _decode_data_url(body["original"]).shape == arr.shape
+    assert _decode_data_url(next(r["image"] for r in body["results"] if r["name"] == "mid")).shape == arr.shape
+
+
+def test_cuda_oom_retries_checkpoint_on_cpu(tmp_path, monkeypatch):
+    torch = pytest.importorskip("torch")
+    from msbgen.api import model_registry
+    from msbgen.models import ModelConfig, MSBNet, save_checkpoint
+
+    _use_models_dir(monkeypatch, tmp_path)
+    model = MSBNet(ModelConfig(arch="cnn", output="direct", arch_args={"width": 4, "depth": 2}))
+    save_checkpoint(tmp_path / "tiny-cnn" / "best.pt", model, step=1)
+    original_load = model_registry.load_model
+    attempted_devices = []
+
+    def load_with_gpu_oom(path, device=None):
+        attempted_devices.append(device)
+        if device is None:
+            raise RuntimeError("CUDA out of memory.")
+        return original_load(path, device)
+
+    monkeypatch.setattr(model_registry, "load_model", load_with_gpu_oom)
+    monkeypatch.setattr(model_registry, "cuda_requested", lambda: True)
+    body = _post_reconstruct(_encode(Image.new("L", (16, 16), 100)), color_mode="L")
+
+    assert attempted_devices == [None, "cpu"]
+    assert any(result["name"] == "tiny-cnn" for result in body["results"])
+    assert any("ran on CPU after CUDA ran out of memory" in note for note in body["notes"])
+
+
+def test_reconstruct_runs_rgb_bitdepth_models_after_checkpoint_failures(tmp_path, monkeypatch):
+    torch = pytest.importorskip("torch")
+    from msbgen.models.bitdepth_recovery import BitplaneResidualCNN
+
+    _use_models_dir(monkeypatch, tmp_path)
+    rgb_root = tmp_path / "rgb"
+    (rgb_root / "broken").mkdir(parents=True)
+    (rgb_root / "broken" / "best.pt").write_bytes(b"not a checkpoint")
+    folder = rgb_root / "bitdepth-tiny-rgb"
+    folder.mkdir()
+    for bit in range(1, 8):
+        model = BitplaneResidualCNN(channels=3, depth=1, filters=2)
+        torch.save({"config": model.config, "state_dict": model.state_dict()}, folder / f"bit_{bit:02d}.pt")
+
+    arr = np.random.default_rng(5).integers(0, 256, (12, 14, 3), dtype=np.uint8)
+    png = _encode(Image.fromarray(arr, "RGB"))
+    for k in (1, 2, 3):
+        body = _post_reconstruct(png, color_mode="RGB", k=k)
+        model_result = next(result for result in body["results"] if result["name"] == "bitdepth-tiny-rgb")
+        assert model_result["kind"] == "model"
+        assert _decode_data_url(model_result["image"]).shape == arr.shape
+        assert any("broken failed" in note for note in body["notes"])
 
 
 def _post_reconstruct(data: bytes, **form):
@@ -320,3 +397,25 @@ def test_reconstruct_errors(tmp_path, monkeypatch):
     res = client.post("/api/reconstruct", files={"file": ("x.png", png8)}, data={"models": "nope"})
     assert res.status_code == 404
     assert [r["name"] for r in _post_reconstruct(png8)["results"]] == ["zero", "mid", "random"]
+
+
+def test_model_registry_selects_ordered_paths_by_color_and_k(tmp_path, monkeypatch):
+    import json
+
+    from msbgen.api import model_registry
+
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps({
+        "grayscale": {"1": ["runs/unet-res/best.pt", "runs/bitdepth-d4"]},
+        "rgb": {"1": ["runs/rgb/cnn/best.pt"], "2": []},
+    }))
+    _use_models_dir(monkeypatch, tmp_path, model_registry_file=registry_path)
+
+    assert model_registry.model_candidates("L", 1) == [
+        ("checkpoint", tmp_path / "runs/unet-res/best.pt"),
+        ("bitdepth", tmp_path / "runs/bitdepth-d4"),
+    ]
+    assert model_registry.model_candidates("RGB", 1) == [
+        ("checkpoint", tmp_path / "runs/rgb/cnn/best.pt"),
+    ]
+    assert model_registry.model_candidates("RGB", 2) == []

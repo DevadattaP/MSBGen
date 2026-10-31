@@ -1,10 +1,8 @@
-// MSBGen front-end: pick an image, send it to /api/bitplanes and /api/analysis, render the results.
+// MSBGen front-end: decode, slice, analyse, then reconstruct one selected mode at a time.
 
 const API_BITPLANES = "/api/bitplanes";
 const API_ANALYSIS = "/api/analysis";
-const API_MODELS = "/api/models";
 const API_RECONSTRUCT = "/api/reconstruct";
-const API_EVALUATIONS = "/api/evaluations";
 const CHANNEL_COLORS = { R: "var(--ch-r)", G: "var(--ch-g)", B: "var(--ch-b)", L: "var(--ch-gray)" };
 const FILL_SERIES = [
   { fill: "mid", name: "Midpoint fill", color: "var(--series-mid)", dashed: false },
@@ -25,6 +23,7 @@ const el = {
   meta: $("#file-meta"),
   sliceBtn: $("#slice-btn"),
   clearBtn: $("#clear-btn"),
+  colorPick: $("#color-pick"),
   notes: $("#notes"),
   error: $("#error"),
   results: $("#results"),
@@ -46,6 +45,8 @@ const el = {
   entropyTable: $("#entropy-table"),
   corrChart: $("#corr-chart"),
   corrReadout: $("#corr-readout"),
+  kControl: $("#k-control"),
+  kPick: $("#k-pick"),
   models: $("#models"),
   modelsSummary: $("#models-summary"),
   modelsStatus: $("#models-status"),
@@ -53,10 +54,6 @@ const el = {
   modelsView: $("#models-view"),
   modelsGrid: $("#models-grid"),
   modelsTable: $("#models-table"),
-  evals: $("#evals"),
-  evalsSummary: $("#evals-summary"),
-  evalsPick: $("#evals-pick"),
-  evalsTable: $("#evals-table"),
   lightbox: $("#lightbox"),
   lbTitle: $("#lightbox-title"),
   lbImg: $("#lightbox-img"),
@@ -68,10 +65,19 @@ const el = {
 let currentFile = null;
 let previewUrl = null;
 let requestId = 0; // ignore responses that arrive after the user picked another file
+let selectedColorMode = "RGB";
+let selectedK = 1;
+let pipelineStarted = false;
+let modeResults = createModeResults();
+let workQueue = Promise.resolve();
 let analysisData = null;
 let recMetric = "psnr";
-let availableModels = null; // from /api/models, fetched once at start-up
 let modelTiles = []; // { tile, img, image, error } for the reconstruction / error toggle
+
+function createModeResults() {
+  const createMode = () => ({ bitplanes: null, analysis: null, reconstructions: new Map(), pending: null });
+  return { L: createMode(), RGB: createMode() };
+}
 
 // ---------- Theme ----------
 function initTheme() {
@@ -129,7 +135,7 @@ function showNotes(notes) {
 function setLoading(on) {
   el.sliceBtn.classList.toggle("loading", on);
   el.sliceBtn.disabled = on || !currentFile;
-  el.sliceBtn.querySelector(".label").textContent = on ? "Slicing…" : "Slice & analyse";
+  el.sliceBtn.querySelector(".label").textContent = on ? "Running…" : "Slice & analyse";
 }
 
 function hideResults() {
@@ -149,6 +155,8 @@ function selectFile(file) {
   }
   requestId++;
   currentFile = file;
+  modeResults = createModeResults();
+  pipelineStarted = false;
   showError("");
   showNotes([]);
   hideResults();
@@ -176,6 +184,8 @@ function selectFile(file) {
 function clearAll() {
   requestId++;
   currentFile = null;
+  modeResults = createModeResults();
+  pipelineStarted = false;
   if (previewUrl) URL.revokeObjectURL(previewUrl);
   previewUrl = null;
   el.fileInput.value = "";
@@ -211,60 +221,88 @@ function initDropzone() {
 }
 
 // ---------- API ----------
-async function postImage(url, file) {
+async function postImage(url, file, fields = {}) {
   const body = new FormData();
   body.append("file", file, file.name || "image.png");
+  for (const [name, value] of Object.entries(fields)) body.append(name, String(value));
   const res = await fetch(url, { method: "POST", body });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.detail || `Request failed (${res.status})`);
   return data;
 }
 
-async function slice() {
-  if (!currentFile) return;
-  const id = ++requestId;
-  const file = currentFile;
-  showError("");
-  hideResults();
-  setLoading(true);
-
-  // All requests start together; the planes usually arrive first and render straight away.
-  const analysis = postImage(API_ANALYSIS, file);
-  analysis.catch(() => {}); // handled below; avoids an unhandled-rejection warning if slicing fails
-  const models = await modelsPromise;
-  const reconstruction = models.length ? postImage(API_RECONSTRUCT, file) : null;
-  reconstruction?.catch(() => {});
-  try {
-    const data = await postImage(API_BITPLANES, file);
-    if (id !== requestId) return;
-    renderResults(data);
-  } catch (err) {
-    if (id === requestId) showError(err.message || String(err));
-    return;
-  } finally {
-    if (id === requestId) setLoading(false);
-  }
-
-  showAnalysisStatus("Analysing bit-planes…", true);
-  if (reconstruction) showModelsStatus("Running models…", true);
-  else showNoModels();
-  await Promise.all([
-    analysis.then(
-      (data) => id === requestId && renderAnalysis(data),
-      (err) => id === requestId && showAnalysisStatus(`Analysis failed: ${err.message || err}`, false),
-    ),
-    reconstruction?.then(
-      (data) => id === requestId && renderModels(data),
-      (err) => id === requestId && showModelsStatus(`Model reconstruction unavailable: ${err.message || err}`, false),
-    ),
-  ]);
+function enqueueWork(work) {
+  const queued = workQueue.then(work);
+  workQueue = queued.catch(() => {});
+  return queued;
 }
 
-// ---------- Models ----------
-const modelsPromise = fetch(API_MODELS)
-  .then((res) => (res.ok ? res.json() : { models: [] }))
-  .then((data) => (availableModels = data).models)
-  .catch(() => []);
+function ensureMode(mode, id = requestId) {
+  const state = modeResults[mode];
+  if (state.pending) return state.pending;
+  const pending = enqueueWork(() => runMode(mode, id));
+  state.pending = pending;
+  pending.finally(() => { if (state.pending === pending) state.pending = null; });
+  return pending;
+}
+
+async function slice() {
+  if (!currentFile) return;
+  pipelineStarted = true;
+  showError("");
+  setLoading(true);
+  ensureMode(selectedColorMode);
+}
+
+async function runMode(mode, id) {
+  if (id !== requestId || !currentFile) return;
+  const file = currentFile;
+  const state = modeResults[mode];
+  const isVisible = () => id === requestId && mode === selectedColorMode;
+  try {
+    if (!state.bitplanes) {
+      state.bitplanes = await postImage(API_BITPLANES, file, { color_mode: mode });
+    }
+    if (id !== requestId) return;
+    if (isVisible()) {
+      renderResults(state.bitplanes);
+      showAnalysisStatus("Analysing bit-planes…", true);
+    }
+
+    if (!state.analysis) {
+      state.analysis = await postImage(API_ANALYSIS, file, { color_mode: mode });
+    }
+    if (id !== requestId) return;
+    if (isVisible()) renderAnalysis(state.analysis);
+
+    while (isVisible()) {
+      const k = selectedK;
+      if (state.reconstructions.has(k)) {
+        renderModels(state.reconstructions.get(k));
+        break;
+      }
+      await runReconstruction(mode, k, id, file, state);
+      if (k === selectedK) break;
+    }
+  } catch (err) {
+    if (id === requestId && isVisible()) {
+      if (!state.bitplanes) showError(err.message || String(err));
+      else if (!state.analysis) showAnalysisStatus(`Analysis failed: ${err.message || err}`, false);
+      else showModelsStatus(`Reconstruction unavailable: ${err.message || err}`, false);
+    }
+  } finally {
+    if (isVisible()) setLoading(false);
+  }
+}
+
+async function runReconstruction(mode, k, id, file, state) {
+  if (id !== requestId) return;
+  showModelsStatus(`Running ${mode === "L" ? "grayscale" : "RGB"} models for k=${k}…`, true);
+  const data = await postImage(API_RECONSTRUCT, file, { color_mode: mode, k });
+  if (id !== requestId) return;
+  state.reconstructions.set(k, data);
+  if (mode === selectedColorMode && k === selectedK) renderModels(data);
+}
 
 function showModelsStatus(message, busy) {
   el.models.hidden = false;
@@ -276,22 +314,13 @@ function showModelsStatus(message, busy) {
   el.modelsStatus.querySelector(".status-text").textContent = message;
 }
 
-function showNoModels() {
-  showModelsStatus("", false);
-  el.modelsStatus.classList.remove("error-text");
-  const reason = availableModels?.torch_available === false
-    ? "PyTorch is not installed, so trained models can't run. "
-    : `No trained models found in ${availableModels?.models_dir ?? "runs"}/. `;
-  el.modelsStatus.querySelector(".status-text").innerHTML =
-    `${escapeHtml(reason)}Train one with <code>python -m msbgen.cli.train --preset unet-res</code>.`;
-}
-
 function renderModels(data) {
+  showNotes(data.notes);
   el.modelsStatus.hidden = true;
   el.modelsBody.hidden = false;
   const ratio = `${data.width} / ${data.height}`;
   const stem = fileStem(data.filename);
-  const n = 8;
+  const n = data.bit_depth;
   const bits = data.k === 1 ? `B${n - 1}` : `B${n - 1}…B${n - data.k}`;
   const models = data.results.filter((r) => r.kind === "model");
   const perceptual = (data.perceptual ?? []).filter((m) => m in PERCEPTUAL_TITLES);
@@ -306,7 +335,7 @@ function renderModels(data) {
   const original = { name: "original", label: "Original", image: data.original, error_map: null };
   const tiles = [original, ...data.results].map((r) => {
     const isOriginal = r === original;
-    const stats = isOriginal ? `grayscale, ${data.width} × ${data.height}` :
+    const stats = isOriginal ? `${data.color_mode === "L" ? "grayscale" : "RGB"}, ${data.width} × ${data.height}` :
       `PSNR ${fmt(r.psnr, 2)} dB${r.kind === "model" ? ` (${gainText(r.psnr_gain)})` : ""} · SSIM ${fmt(r.ssim)}`;
     const tile = {
       image: r.image,
@@ -315,7 +344,7 @@ function renderModels(data) {
       tag: r === best ? "best" : "",
       highlight: false,
       stats,
-      title: isOriginal ? "Original (grayscale)" : `${r.label} — from ${bits} only`,
+      title: isOriginal ? `Original (${data.color_mode === "L" ? "grayscale" : "RGB"})` : `${r.label} — from ${bits} only`,
       caption: isOriginal ? "The image every method is compared against." :
         `${stats} · MAE ${r.mae.toFixed(2)}${perceptual.map((m) => ` · ${PERCEPTUAL_TITLES[m]} ${fmt(r[m], 3)}`).join("")}` +
         ` · MSB consistency ${pct(r.msb_consistency)}.`,
@@ -342,78 +371,6 @@ function renderModels(data) {
 
 const PERCEPTUAL_TITLES = { lpips: "LPIPS", dists: "DISTS" };
 
-// ---------- Saved test-set evaluations ----------
-// key → column title, decimals, higher is better (null: no "best"), scale
-const EVAL_COLUMNS = [
-  { key: "psnr", title: "PSNR (dB) ↑", digits: 2, higher: true },
-  { key: "ssim", title: "SSIM ↑", digits: 4, higher: true },
-  { key: "lpips", title: "LPIPS ↓", digits: 4, higher: false },
-  { key: "dists", title: "DISTS ↓", digits: 4, higher: false },
-  { key: "kid", title: "KID ×10³ ↓", digits: 1, higher: false, scale: 1e3, spread: true },
-  { key: "mae", title: "MAE ↓", digits: 2, higher: false },
-  { key: "psnr_avg", title: "PSNR avg (dB)", digits: 2, higher: null },
-  { key: "diversity", title: "Diversity", digits: 2, higher: null },
-  { key: "msb_consistency", title: "MSB consistency", digits: 4, higher: null, format: pct },
-  { key: "time_s", title: "Time (s)", digits: 3, higher: null },
-];
-const KIND_TEXT = { fill: "baseline", regression: "regression", generative: "generative" };
-let evaluations = [];
-
-async function loadEvaluations() {
-  try {
-    const res = await fetch(API_EVALUATIONS);
-    if (!res.ok) return;
-    evaluations = (await res.json()).evaluations;
-  } catch { return; }
-  if (!evaluations.length) return;
-  el.evals.hidden = false;
-  el.evalsPick.hidden = evaluations.length < 2;
-  el.evalsPick.replaceChildren(...evaluations.map((ev, i) => {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.textContent = ev.name;
-    btn.dataset.index = String(i);
-    btn.setAttribute("aria-pressed", String(i === 0));
-    return btn;
-  }));
-  el.evalsPick.addEventListener("click", (e) => {
-    const btn = e.target.closest("button[data-index]");
-    if (!btn) return;
-    for (const b of el.evalsPick.querySelectorAll("button")) b.setAttribute("aria-pressed", String(b === btn));
-    renderEvaluation(evaluations[Number(btn.dataset.index)]);
-  });
-  renderEvaluation(evaluations[0]);
-}
-
-function renderEvaluation(ev) {
-  const columns = EVAL_COLUMNS.filter((c) => ev.methods.some((m) => m.metrics[c.key]));
-  const when = new Date(ev.modified * 1000).toLocaleString();
-  el.evalsSummary.textContent = `${ev.name}: ${ev.images} images from ${ev.data}, k = ${ev.k}` +
-    `${ev.samples > 1 ? `, ${ev.samples} samples per stochastic method` : ""}` +
-    `${ev.kid_patch ? `, KID on ${ev.kid_patch} px patches` : ""} · ${when}`;
-  const best = {};
-  for (const c of columns) {
-    if (c.higher == null) continue;
-    const values = ev.methods.map((m) => m.metrics[c.key]?.mean).filter((v) => v != null);
-    if (values.length > 1) best[c.key] = c.higher ? Math.max(...values) : Math.min(...values);
-  }
-  const cell = (m, c) => {
-    const s = m.metrics[c.key];
-    if (!s) return "<td>—</td>";
-    const v = s.mean * (c.scale ?? 1);
-    const text = c.format ? c.format(s.mean) : v.toFixed(c.digits);
-    // Summaries from before the KID fix have a spread of (numerically) 0 for deterministic methods: hide it.
-    const pm = (s.std * (c.scale ?? 1)).toFixed(c.digits);
-    const spread = c.spread && Number(pm) > 0 ? ` <span class="pm">± ${pm}</span>` : "";
-    return `<td${s.mean === best[c.key] ? ' class="best-cell"' : ""}>${text}${spread}</td>`;
-  };
-  const rows = ev.methods.map((m) =>
-    `<tr><td>${escapeHtml(m.label)}${m.kind === "fill" ? "" : ` <span class="hint">${escapeHtml(m.name)}</span>`}</td>` +
-    `<td>${KIND_TEXT[m.kind] ?? escapeHtml(m.kind)}</td>${columns.map((c) => cell(m, c)).join("")}</tr>`);
-  el.evalsTable.innerHTML = `<thead><tr><th>Method</th><th>Kind</th>` +
-    `${columns.map((c) => `<th>${c.title}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody>`;
-}
-
 function gainText(g, html = false) {
   if (g == null) return "—";
   const text = `${g >= 0 ? "+" : "−"}${Math.abs(g).toFixed(2)} dB`;
@@ -434,6 +391,52 @@ function initModelsView() {
       t.tile.image = src;
     }
   });
+}
+
+function initModeControls() {
+  el.colorPick.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-color-mode]");
+    if (!button || button.dataset.colorMode === selectedColorMode) return;
+    selectedColorMode = button.dataset.colorMode;
+    for (const item of el.colorPick.querySelectorAll("button")) {
+      item.setAttribute("aria-pressed", String(item === button));
+    }
+    if (!pipelineStarted) return;
+    showError("");
+    displayModeResults(selectedColorMode);
+    setLoading(true);
+    ensureMode(selectedColorMode);
+  });
+  el.kPick.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-k]");
+    if (!button) return;
+    selectedK = Number(button.dataset.k);
+    for (const item of el.kPick.querySelectorAll("button")) {
+      item.setAttribute("aria-pressed", String(item === button));
+    }
+    if (pipelineStarted) {
+      displayModeResults(selectedColorMode);
+      ensureMode(selectedColorMode);
+    }
+  });
+}
+
+function displayModeResults(mode) {
+  const state = modeResults[mode];
+  el.results.hidden = !state.bitplanes;
+  el.analysis.hidden = !state.bitplanes;
+  el.models.hidden = !state.analysis;
+  el.kControl.hidden = !state.analysis;
+  if (!state.bitplanes) return;
+  renderResults(state.bitplanes);
+  if (!state.analysis) {
+    showAnalysisStatus("Analysing bit-planes…", true);
+    return;
+  }
+  renderAnalysis(state.analysis);
+  const reconstruction = state.reconstructions.get(selectedK);
+  if (reconstruction) renderModels(reconstruction);
+  else showModelsStatus(`Waiting for ${mode === "L" ? "grayscale" : "RGB"} reconstruction, k=${selectedK}…`, true);
 }
 
 // ---------- Bit-plane rendering ----------
@@ -625,6 +628,7 @@ function renderAnalysis(data) {
 
   el.analysisStatus.hidden = true;
   el.analysisBody.hidden = false;
+  el.kControl.hidden = false;
   renderReconstructions(data);
   renderEntropy(data);
   renderCorrelation(data);
@@ -925,6 +929,6 @@ initDropzone();
 initLightbox();
 initRecMetric();
 initModelsView();
-loadEvaluations();
+initModeControls();
 el.sliceBtn.addEventListener("click", slice);
 el.clearBtn.addEventListener("click", clearAll);

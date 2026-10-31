@@ -130,7 +130,7 @@ class MethodResult(BaseModel):
 
 class ReconstructResponse(ImageInfo):
     k: int
-    original: str = Field(description="The image that was reconstructed (grayscale), as a PNG data URL")
+    original: str = Field(description="The selected-color image that was reconstructed, as a PNG data URL")
     results: list[MethodResult] = Field(description="Fills first (zero, mid, random), then models")
     perceptual: list[str] = Field(default_factory=list, description="Perceptual metrics computed: 'lpips', 'dists'")
 

@@ -16,6 +16,12 @@ class Settings:
     max_pixels: int = int(os.getenv("MSBGEN_MAX_PIXELS", str(4096 * 4096)))
     # Trained checkpoints are discovered as <models_dir>/<run>/best.pt.
     models_dir: Path = Path(os.getenv("MSBGEN_MODELS_DIR", "runs"))
+    # Sequential bitplane CNNs are discovered as <bitdepth_models_dir>/bitdepth-*/bit_NN.pt.
+    bitdepth_models_dir: Path = Path(
+        os.getenv("MSBGEN_BITDEPTH_MODELS_DIR", os.getenv("MSBGEN_MODELS_DIR", "runs"))
+    )
+    # Optional JSON mapping of color mode and k to ordered checkpoint paths.
+    model_registry_file: Path | None = Path(os.environ["MSBGEN_MODEL_REGISTRY"]) if os.getenv("MSBGEN_MODEL_REGISTRY") else None
     device: str | None = os.getenv("MSBGEN_DEVICE") or None  # default: cuda if available
     # Saved test-set evaluations (msbgen.cli.evaluate output) are read from <eval_dir>/*/summary.json.
     eval_dir: Path = Path(os.getenv("MSBGEN_EVAL_DIR", "outputs/eval"))

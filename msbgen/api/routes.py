@@ -40,6 +40,7 @@ from msbgen.core import (
     analyze_image,
     binary_entropy,
     combine_channel_planes,
+    convert_color_mode,
     encode_png,
     encode_rgb_bits_png,
     load_image,
@@ -48,7 +49,6 @@ from msbgen.core import (
     round_estimate,
     slice_bitplanes,
     summary_method_kind,
-    to_grayscale,
     to_preview,
 )
 
@@ -173,7 +173,7 @@ def _build_analysis(loaded: LoadedImage, filename: str | None) -> AnalysisRespon
     )
 
 
-async def _load_upload(file: UploadFile) -> LoadedImage:
+async def _load_upload(file: UploadFile, color_mode: str | None = None) -> LoadedImage:
     data = await file.read(settings.max_upload_bytes + 1)
     if not data:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Empty upload.")
@@ -183,8 +183,11 @@ async def _load_upload(file: UploadFile) -> LoadedImage:
             f"File exceeds the {settings.max_upload_mb:g} MB limit.",
         )
     try:
-        return await run_in_threadpool(load_image, data, settings.max_pixels)
+        loaded = await run_in_threadpool(load_image, data, settings.max_pixels)
+        return convert_color_mode(loaded, color_mode)
     except ImageDecodeError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
 
@@ -194,18 +197,18 @@ def health() -> dict[str, str]:
 
 
 @router.post("/bitplanes", response_model=BitPlaneResponse)
-async def bitplanes(file: UploadFile) -> BitPlaneResponse:
+async def bitplanes(file: UploadFile, color_mode: str | None = Form(None)) -> BitPlaneResponse:
     """Slice an uploaded image into bit_depth planes per channel after normalising it to
     grayscale or RGB (8 / 24 planes for 8-bit, 16 / 48 for 16-bit)."""
-    loaded = await _load_upload(file)
+    loaded = await _load_upload(file, color_mode)
     return await run_in_threadpool(_build_response, loaded, file.filename)
 
 
 @router.post("/analysis", response_model=AnalysisResponse)
-async def analysis(file: UploadFile) -> AnalysisResponse:
+async def analysis(file: UploadFile, color_mode: str | None = Form(None)) -> AnalysisResponse:
     """Bit-plane analysis: per-plane entropy (i.i.d. and context), spatial and
     inter-plane correlation, and quality of reconstructions from the top k planes."""
-    loaded = await _load_upload(file)
+    loaded = await _load_upload(file, color_mode)
     return await run_in_threadpool(_build_analysis, loaded, file.filename)
 
 
@@ -221,11 +224,22 @@ def _model_info(m) -> ModelInfo:
 @router.get("/models", response_model=ModelsResponse)
 async def models() -> ModelsResponse:
     """Trained reconstruction models found in MSBGEN_MODELS_DIR (default `runs/`)."""
-    found = await run_in_threadpool(model_registry.list_models)
+    paths = await run_in_threadpool(model_registry.model_paths)
+    found = []
+    for path in paths:
+        model = None
+        try:
+            model = await run_in_threadpool(model_registry.load_model, path, "cpu")
+            found.append(_model_info(model))
+        except Exception:  # noqa: BLE001 - a broken checkpoint must not break the model list
+            continue
+        finally:
+            del model
+            model_registry.release_model_memory()
     return ModelsResponse(
         torch_available=model_registry.torch_available(),
         models_dir=str(settings.models_dir),
-        models=[_model_info(m) for m in found],
+        models=found,
     )
 
 
@@ -236,18 +250,8 @@ def _build_reconstruction(loaded: LoadedImage, filename: str | None, k: int, nam
     if not 1 <= k < n:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"k must be between 1 and {n - 1}.")
     info = _image_info(loaded, filename)
-    image = loaded.array
-    if loaded.color_mode == "RGB":
-        image = to_grayscale(image)
-        info["notes"] = [*info["notes"], "Converted to grayscale: the baselines are trained on 8-bit grayscale."]
-    image = image[..., 0]
-
-    available = [m for m in model_registry.list_models() if m.supports(k, n, 1)]
-    if names:
-        unknown = set(names) - {m.name for m in available}
-        if unknown:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, f"No compatible model named {', '.join(sorted(unknown))}.")
-        available = [m for m in available if m.name in names]
+    image = loaded.array[..., 0] if loaded.color_mode == "L" else loaded.array
+    channels = 1 if loaded.color_mode == "L" else 3
     perceptual = {}
     if image.size <= settings.perceptual_max_pixels:
         perceptual = model_registry.perceptual_metrics()
@@ -255,37 +259,93 @@ def _build_reconstruction(loaded: LoadedImage, filename: str | None, k: int, nam
         info["notes"] = [*info["notes"], "LPIPS and DISTS skipped: the image is too large for the perceptual metrics."]
 
     results: list[MethodResult] = []
-    methods = [(r, "fill") for r in FILL_RECONSTRUCTORS.values()] + [(m, "model") for m in available]
-    for method, kind in methods:
-        if kind == "model":
-            with model_registry.inference_lock():
-                estimate, scores = reconstruct_and_evaluate(method, image, k, n)
-        else:
-            estimate, scores = reconstruct_and_evaluate(method, image, k, n)
+    for method in FILL_RECONSTRUCTORS.values():
+        estimate, scores = reconstruct_and_evaluate(method, image, k, n)
         error = np.clip(np.abs(image.astype(np.float64) - estimate) * ERROR_MAP_GAIN, 0, 255).astype(np.uint8)
         with model_registry.inference_lock():
             extra = {name: _finite(fn(image, estimate, 255.0)) for name, fn in perceptual.items()}
         results.append(MethodResult(
-            name=method.name, label=method.label, kind=kind,
+            name=method.name, label=method.label, kind="fill",
             psnr=_finite(scores["psnr"]), ssim=_finite(scores["ssim"]), mae=scores["mae"],
             msb_consistency=scores["msb_consistency"], **extra,
             psnr_gain=None,
             image=_data_url(encode_png(round_estimate(estimate, n))),
             error_map=_data_url(encode_png(error)),
         ))
+
+    candidates = model_registry.model_candidates(loaded.color_mode, k)
+
+    def run_candidate(kind: str, path, device: str | None = None, include_perceptual: bool = True):
+        if kind == "checkpoint":
+            with model_registry.inference_lock():
+                method = model_registry.load_model(path, device)
+        else:
+            from msbgen.models.reconstructor import BitplaneReconstructor
+
+            method = BitplaneReconstructor(path, device=device or settings.device)
+        if not method.supports(k, n, channels):
+            return None
+        with model_registry.inference_lock():
+            estimate, scores = reconstruct_and_evaluate(method, image, k, n)
+        error = np.clip(np.abs(image.astype(np.float64) - estimate) * ERROR_MAP_GAIN, 0, 255).astype(np.uint8)
+        extra = {}
+        if include_perceptual:
+            with model_registry.inference_lock():
+                extra = {name: _finite(fn(image, estimate, 255.0)) for name, fn in perceptual.items()}
+        return MethodResult(
+            name=method.name, label=method.label, kind="model",
+            psnr=_finite(scores["psnr"]), ssim=_finite(scores["ssim"]), mae=scores["mae"],
+            msb_consistency=scores["msb_consistency"], **extra,
+            psnr_gain=None,
+            image=_data_url(encode_png(round_estimate(estimate, n))),
+            error_map=_data_url(encode_png(error)),
+        )
+
+    for kind, path in candidates:
+        candidate_name = path.parent.name if kind == "checkpoint" else path.name
+        if names and candidate_name not in names:
+            continue
+        try:
+            result = run_candidate(kind, path)
+        except Exception as exc:  # noqa: BLE001 - handle each model independently
+            if not model_registry.cuda_requested() or not model_registry.is_cuda_oom(exc):
+                info["notes"].append(f"Model {candidate_name} failed: {exc}")
+                model_registry.release_model_memory()
+                continue
+            model_registry.release_model_memory()
+            try:
+                result = run_candidate(kind, path, device="cpu", include_perceptual=False)
+                info["notes"].append(
+                    f"Model {candidate_name} ran on CPU after CUDA ran out of memory; perceptual scores were skipped."
+                )
+            except Exception as cpu_exc:  # noqa: BLE001 - report the CPU retry failure and continue
+                info["notes"].append(f"Model {candidate_name} failed on GPU and CPU retry: {cpu_exc}")
+                result = None
+        finally:
+            model_registry.release_model_memory()
+        if result is not None:
+            results.append(result)
+
+    if names:
+        found = {result.name for result in results if result.kind == "model"}
+        unknown = set(names) - found
+        if unknown:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"No compatible model named {', '.join(sorted(unknown))}.")
+
     mid = next(r.psnr for r in results if r.name == "mid")
     for r in results:
         r.psnr_gain = r.psnr - mid if r.psnr is not None and mid is not None else None
-    info["color_mode"], info["channels"] = "L", [Channel(name="L", label="Gray").model_dump()]
     return ReconstructResponse(**info, k=k, original=_data_url(encode_png(image)), results=results,
                                perceptual=list(perceptual))
 
 
 @router.post("/reconstruct", response_model=ReconstructResponse)
-async def reconstruct(file: UploadFile, k: int = Form(1), models: str | None = Form(None)) -> ReconstructResponse:
+async def reconstruct(
+    file: UploadFile, k: int = Form(1), models: str | None = Form(None), color_mode: str | None = Form(None)
+) -> ReconstructResponse:
     """Reconstruct the image from its top k planes with the fills (zero, mid, random) and every compatible
-    trained model (or only `models`, comma-separated). Colour images are converted to grayscale."""
-    loaded = await _load_upload(file)
+    trained model (or only `models`, comma-separated), preserving the selected color mode."""
+    loaded = await _load_upload(file, color_mode)
     names = [m.strip() for m in models.split(",") if m.strip()] if models else None
     return await run_in_threadpool(_build_reconstruction, loaded, file.filename, k, names)
 

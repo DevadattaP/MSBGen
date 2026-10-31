@@ -706,7 +706,9 @@ To make it reachable from other machines on your network:
 | --- | --- | --- |
 | `MSBGEN_MAX_UPLOAD_MB` | `25` | Maximum upload size |
 | `MSBGEN_MAX_PIXELS` | `16777216` (4096²) | Maximum image area |
-| `MSBGEN_MODELS_DIR` | `runs` | Where the web app looks for `<run>/best.pt` checkpoints |
+| `MSBGEN_MODELS_DIR` | `runs` | Auto-discovery root: `<root>/*/best.pt` for grayscale, `<root>/rgb/*/best.pt` for RGB |
+| `MSBGEN_BITDEPTH_MODELS_DIR` | `runs` | Auto-discovery root for `bitdepth-*` folders; RGB folders are under `<root>/rgb/` |
+| `MSBGEN_MODEL_REGISTRY` | unset | Optional JSON file selecting ordered model paths by color mode and `k` |
 | `MSBGEN_DEVICE` | auto | Device for model inference (`cuda`, `cpu`, …) |
 | `MSBGEN_EVAL_DIR` | `outputs/eval` | Where the web app looks for saved evaluations (`<name>/summary.json`) |
 | `MSBGEN_PERCEPTUAL` | `1` | `0` turns off LPIPS / DISTS per reconstruction |
@@ -722,7 +724,9 @@ python -m pytest
 
 ### `POST /api/bitplanes`
 
-Multipart form upload with a single field `file`.
+Multipart form upload with `file` and optional `color_mode` (`L` or `RGB`). The web UI
+lets you choose the mode before slicing; direct API calls without `color_mode` keep the
+decoded image's natural mode.
 
 ```bash
 curl -F "file=@photo.jpg" http://127.0.0.1:8000/api/bitplanes
@@ -762,7 +766,7 @@ Errors: `400` for an empty or undecodable file or one over the pixel limit, and
 
 ### `POST /api/analysis`
 
-Same upload as `/api/bitplanes`. Returns the same image fields (`filename`,
+Same upload as `/api/bitplanes`, including its optional `color_mode`. Returns the same image fields (`filename`,
 `width`, `color_mode`, `bit_depth`, `channels`, `notes`, …) plus:
 
 ```json
@@ -795,13 +799,35 @@ The list is re-scanned on every call, so new runs appear without a restart.
 
 ### `POST /api/reconstruct`
 
-Multipart `file`, plus optional form fields `k` (default 1) and `models`
-(comma-separated names; default: every compatible model). The image must be
-8-bit; colour images are converted to grayscale, with a note. Diffusion and flow
+Multipart `file`, plus optional form fields `k` (default 1), `color_mode` (`L` or
+`RGB`), and `models` (comma-separated names; default: every compatible model).
+The selected color mode is preserved in baselines and model inputs. The image must be
+8-bit for trained model inference. Compatible `best.pt` checkpoints and sequential
+`bitdepth-*/bit_NN.pt` models run one at a time; model failures are reported in `notes`
+without suppressing other successful results. Diffusion and flow
 models return their seed-0 sample with the checkpoint's sampler (3 steps by default,
 about 1–2 s for a Kodak-sized image on the MX350; the request waits if the thermal
 guard pauses). Returns the image
 fields plus:
+
+Set `MSBGEN_MODEL_REGISTRY` to a JSON file to choose only selected models and their
+run order. Paths are relative to the JSON file; `.pt` paths select standard checkpoints,
+and directory paths select sequential bitdepth models:
+
+```json
+{
+  "grayscale": {
+    "1": ["runs/unet-res/best.pt", "runs/bitdepth-d4"],
+    "2": ["runs/unet-res-k2/best.pt"],
+    "3": []
+  },
+  "rgb": {
+    "1": ["runs/rgb/unet-res/best.pt"],
+    "2": [],
+    "3": []
+  }
+}
+```
 
 ```json
 {

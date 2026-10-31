@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import gc
 from pathlib import Path
 from typing import Callable
 
@@ -14,7 +15,7 @@ import torch
 
 from msbgen.core.reconstruction import Reconstructor
 from msbgen.models.checkpoint import GENERATIVE_KINDS, load_model, read_checkpoint
-from msbgen.models.bitdepth_recovery import BitplaneResidualCNN, recover_bitplanes
+from msbgen.models.bitdepth_recovery import BitplaneResidualCNN
 
 
 def default_device() -> torch.device:
@@ -254,7 +255,6 @@ class BitplaneReconstructor(Reconstructor):
         self.device = torch.device(device) if device else default_device()
         self.name = name or self.folder.name
         self.label = "Sequential bitplane CNN"
-        self._models: dict[int, torch.nn.Module] = {}
 
     def _path(self, bits: int) -> Path:
         return self.folder / f"bit_{bits:02d}.pt"
@@ -262,22 +262,36 @@ class BitplaneReconstructor(Reconstructor):
     def supports(self, k: int, bit_depth: int, channels: int) -> bool:
         if not all(self._path(b).exists() for b in range(k, bit_depth)):
             return False
-        return all(self._model(b).config["channels"] == channels for b in range(k, bit_depth))
-
-    def _model(self, bits: int) -> torch.nn.Module:
-        if bits not in self._models:
-            payload = torch.load(self._path(bits), map_location=self.device, weights_only=True)
-            model = BitplaneResidualCNN(**payload["config"])
-            model.load_state_dict(payload["state_dict"])
-            self._models[bits] = model.to(self.device).eval()
-        return self._models[bits]
+        for bits in range(k, bit_depth):
+            payload = torch.load(self._path(bits), map_location="cpu", weights_only=True)
+            model_channels = payload["config"]["channels"]
+            del payload
+            if model_channels != channels:
+                return False
+        return True
 
     @torch.no_grad()
     def reconstruct(self, top: np.ndarray, k: int, bit_depth: int) -> np.ndarray:
         maximum = float((1 << bit_depth) - 1)
-        source = _to_tensor(top) / maximum
-        out = recover_bitplanes(source, [self._model(b) for b in range(k, bit_depth)], k, bit_depth, self.device)
-        return _to_estimate(out, maximum, top)
+        current = (_to_tensor(top) / maximum).to(self.device)
+        for bits in range(k, bit_depth):
+            model = None
+            payload = None
+            try:
+                payload = torch.load(self._path(bits), map_location="cpu", weights_only=True)
+                model = BitplaneResidualCNN(**payload["config"])
+                model.load_state_dict(payload["state_dict"])
+                del payload
+                payload = None
+                model = model.to(self.device).eval()
+                weight = float(1 << (bit_depth - bits - 1)) / maximum
+                current = current + torch.sigmoid(model(current)) * weight
+            finally:
+                del model, payload
+                gc.collect()
+                if self.device.type == "cuda":
+                    torch.cuda.empty_cache()
+        return _to_estimate(current.clamp(0, 1), maximum, top)
 
 
 SAMPLER_OPTIONS = {"diffusion": ("steps", "eta"), "flow": ("steps", "solver"), "normalizing_flow": (),

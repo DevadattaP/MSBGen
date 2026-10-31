@@ -20,6 +20,7 @@ from msbgen.core.bitplanes import (
 from msbgen.core.image_io import (
     ImageDecodeError,
     LoadedImage,
+    convert_color_mode,
     encode_png,
     encode_rgb_bits_png,
     load_image,

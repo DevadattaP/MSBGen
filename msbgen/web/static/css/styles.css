@@ -155,6 +155,8 @@ h2 { font-size: 1.05rem; }
 .meta dt { color: var(--muted); }
 .meta dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
 .actions { display: flex; gap: 0.5rem; margin-left: auto; }
+.mode-control { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; }
+.mode-label { color: var(--muted); font-size: 0.85rem; font-weight: 600; }
 
 /* ---------- Buttons ---------- */
 .btn {
