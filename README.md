@@ -21,21 +21,17 @@ one-to-many problem. That is why a **generative** model makes sense here rather
 than a single regression. See [PLAN.md](PLAN.md) for the full research plan,
 research questions and milestones.
 
-## Current status
+### RGB model results
 
-| Milestone | Status |
-| --- | --- |
-| Bit-plane explorer web app (slice & visualise planes) | ✅ done |
-| Bit-plane analysis (entropy, correlations, k-MSB reconstruction) | ✅ done |
-| Deterministic baselines (CNN / U-Net, residual prediction) | ✅ done: [results](#results-kodak) |
-| Conditional diffusion on the residual, p(R \| B7) | ✅ done: [results](#diffusion-results-kodak) |
-| Perceptual evaluation (DISTS, patch KID, plots, web UI) | ✅ done |
-| Conditional flow matching on the residual | ✅ done: [results](#flow-matching-results-kodak) |
-| Conditional normalizing flow | ✅ k=1 and patch-size ablation complete; not competitive as decoder: [results](#normalizing-flow-results-kodak) |
-| Multi-MSB experiments | ✅ k=1/2/3 model comparison complete |
-| Three-stage hybrid (residual U-Net + flow matching + diffusion) | ✅ trained and evaluated at k=1/2/3: [results](#hybrid-results-kodak) |
-| ViT regressor and ViT-based hybrid | ✅ trained and evaluated at k=1/2/3; below the U-Net models except ViT hybrid at k=1 PSNR: [results](#vit-results-kodak) |
-| Entropy coding and final codec | 🟡 reference range coder and Kodak rate measurement complete; production codec work remains |
+The RGB experiments train on RGB DIV2K and evaluate on all 24 RGB Kodak images. Here `k` counts retained MSB bitplanes **per channel**, so the RGB input carries `3k` binary planes per pixel before entropy coding. The sequential bitplane CNN leads PSNR and SSIM at k=2 and k=3; the best perceptual metrics vary by k and metric, and no single model wins across all measures. These are single-run results, not a multi-seed benchmark.
+
+| k | Highest PSNR | Highest SSIM | Lowest LPIPS | Lowest DISTS | Lowest KID × 10³ |
+| ---: | --- | --- | --- | --- | --- |
+| 1 | ViT hybrid stage 1 (18.82 dB) | Bit-depth recovery (0.6660) | Hybrid (0.4223) | Hybrid (0.2399) | ViT hybrid stages 1+2 (45.06) |
+| 2 | Bit-depth recovery (27.00 dB) | Bit-depth recovery (0.8468) | Hybrid (0.1898) | Hybrid stages 1+2 (0.1189) | Hybrid (18.13) |
+| 3 | Bit-depth recovery (33.89 dB) | Bit-depth recovery (0.9358) | Hybrid (0.0772) | Hybrid (0.0566) | ViT hybrid (5.33) |
+
+The [RGB Kodak results in REPORT.md](REPORT.md#rgb-kodak-results) contain the complete comparisons for every method, including MAE, MSB consistency, sample-mean PSNR, diversity and inference time.
 
 ### Bit-plane explorer
 

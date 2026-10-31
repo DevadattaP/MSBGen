@@ -27,8 +27,8 @@ command-line entry points are in [`msbgen/cli`](../cli/README.md).
 
 ## The task
 
-The receiver has only the top k planes. For the first baselines k = 1, n = 8,
-grayscale:
+The receiver has only the top k planes. The first baselines used grayscale with
+k = 1 and n = 8:
 
 $$
 B_7 \;\longrightarrow\; \text{network} \;\longrightarrow\; \hat I \approx I
@@ -39,20 +39,45 @@ job is to beat the no-model **midpoint fill** $128\,B_7 + 63.5$. The training lo
 reports this directly as `val_gain_db`, the PSNR gain over midpoint fill on the
 same validation crops.
 
+### Grayscale and RGB channels
+
+All reconstruction models support one-channel grayscale (`channels=1`, the
+default) and three-channel RGB (`channels=3`). Prepared grayscale arrays have
+shape `(H, W)`; prepared RGB arrays have shape `(H, W, 3)`. The crop datasets
+return `(C, H, W)` tensors. For each channel, the model encodes the same `k`
+most-significant planes; therefore the network input has `C*k` channels and its
+image/residual output has `C` channels. For example, RGB with `k=2` supplies six
+encoded planes and predicts a three-channel reconstruction. This applies to the
+regression, generative, hybrid, normalizing-flow, and sequential bitplane models.
+
+```shell
+python -m msbgen.cli.prepare_data div2k kodak --color rgb
+python -m msbgen.cli.train --preset unet-res --color rgb --k 2 \
+  --train data/processed/div2k-train-rgb --val data/processed/div2k-valid-rgb
+python -m msbgen.cli.evaluate data/processed/kodak-rgb --k 2 \
+  --models runs/unet-res/best.pt --lpips --dists --kid
+```
+
+Use the RGB-prepared folders for both training and evaluation. `train --color
+auto` infers the model channel count from its training arrays; the evaluator
+reads channels from `.npy` files and checks them against each checkpoint. The
+RGB experiment results are recorded in [REPORT.md](../../REPORT.md#rgb-kodak-results).
+
 ## `MSBNet`: input and output conventions
 
 ```python
 from msbgen.models import ModelConfig, MSBNet
 
 model = MSBNet(ModelConfig(arch="unet", output="residual", k=1, arch_args={"width": 24, "levels": 4}))
-est = model(top)       # top: (B, 1, H, W) image with only the top k bits set, any numeric dtype
-                       # est: (B, 1, H, W) in [0, 1] = Î / 255
+est = model(top)       # top: (B, C, H, W), C=1 or 3, with only the top k bits set
+                       # est: (B, C, H, W) in [0, 1] = Î / 255
 ```
 
 **Input.** The model receives `top` (the top-k image) and splits it into planes
 itself: $B_{n-1}, \dots, B_{n-k}$, stacked as channels and mapped to ±0.5. The
-same data pipeline therefore works for any k, and the model can't see bits the
-receiver doesn't have.
+planes are stacked within each image channel, so the encoded input has `C*k`
+channels. The same data pipeline therefore works for either supported channel
+count and any k, and the model can't see bits the receiver doesn't have.
 
 **Output modes** (`ModelConfig.output`):
 

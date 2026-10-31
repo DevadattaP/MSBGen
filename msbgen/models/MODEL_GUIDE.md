@@ -4,14 +4,14 @@ This guide describes how the models in this package turn a partially observed im
 
 ## 1. The Reconstruction Problem
 
-Let `x` be an 8-bit image and `k` the number of transmitted most-significant bits. The observed image is the original with its lower `8-k` bits cleared:
+Let `x` be an 8-bit grayscale or RGB image and `k` the number of transmitted most-significant bits **per channel**. The observed image is the original with its lower `8-k` bits cleared independently in each channel:
 
 ```text
  top = floor(x / 2^(8-k)) * 2^(8-k)
  residual = x - top
 ```
 
-For grayscale, each pixel is a value in `[0, 255]`; RGB uses the same operation per channel. A model can only use `top`, never the discarded bits. Most MSBGen models predict the complete image or its missing residual in one pass/sample. The bitplane-wise model is different: it predicts one missing binary plane at a time, in order.
+For grayscale, `x` has shape `(H, W)`; RGB has shape `(H, W, 3)`. Models receive channel-first tensors with `C=1` or `C=3`. A model can only use `top`, never the discarded bits. Most MSBGen models predict the complete image or its missing residual in one pass/sample. The bitplane-wise model is different: it predicts one missing binary plane at a time, in order.
 
 Two scales appear in the code:
 
@@ -37,7 +37,7 @@ Two scales appear in the code:
 
 ### Input and encoding
 
-`MSBNet.forward(top)` first extracts each transmitted bitplane, from most to least significant, and stacks them as channels. Bit values `0/1` are mapped to `-0.5/+0.5`. For grayscale with `k=1`, the backbone receives one channel; with `k=3`, it receives three. RGB receives `3*k` channels when configured with three channels. The model API supports this, while the repository's standard crop-training loader uses grayscale `.npy` data. A U-Net input is reflect-padded (or replicate-padded for very small dimensions) to a multiple of `2**levels`, then cropped back after inference.
+`MSBNet.forward(top)` first extracts each transmitted bitplane, from most to least significant, and stacks them as channels. Bit values `0/1` are mapped to `-0.5/+0.5`. With `C` image channels and `k` transmitted planes per channel, the backbone receives `C*k` channels and predicts `C` output channels. The crop-training loader accepts grayscale `(H, W)` and RGB `(H, W, 3)` arrays and returns `(C, H, W)` tensors. A U-Net input is reflect-padded (or replicate-padded for very small dimensions) to a multiple of `2**levels`, then cropped back after inference.
 
 ### Backbones
 
@@ -61,7 +61,7 @@ The target remains the full normalized image, not a separate residual tensor. Th
 
 ### Training and prediction
 
-The standard trainer samples random 128x128 crops from prepared DIV2K by default, with random flips and right-angle rotations. It uses Adam (default learning rate `2e-4`), 16 crops per batch, gradient clipping, a short learning-rate warmup, and cosine decay. Regression checkpoints are selected by validation PSNR. At inference, quantize the input to its top `k` bits, call the model once, multiply the `[0,1]` output by 255, and round/clip if an integer image is needed.
+The standard trainer samples random 128x128 crops from prepared DIV2K by default, with random flips and right-angle rotations. It uses Adam (default learning rate `2e-4`), 16 crops per batch, gradient clipping, a short learning-rate warmup, and cosine decay. Regression checkpoints are selected by validation PSNR. `--color auto` (default) infers one or three channels from the training arrays; `--color gray` and `--color rgb` select explicitly. At inference, quantize each channel to its top `k` bits, call the model once, multiply the `[0,1]` output by 255, and round/clip if an integer image is needed.
 
 Example:
 
@@ -69,11 +69,24 @@ Example:
 python -m msbgen.cli.train --preset unet-res --name unet-res-k1 --k 1
 ```
 
+RGB training and evaluation use the RGB-prepared data directories and keep grayscale
+checkpoints and arrays separate:
+
+```bash
+python -m msbgen.cli.prepare_data div2k kodak --color rgb
+python -m msbgen.cli.train --preset unet-res --name unet-res-rgb-k2 --k 2 \
+	--train data/processed/div2k-train-rgb --val data/processed/div2k-valid-rgb
+python -m msbgen.cli.evaluate data/processed/kodak-rgb --k 2 \
+	--models runs/unet-res-rgb-k2/best.pt --color rgb
+```
+
+For the full set of RGB model results, see [REPORT.md](../../REPORT.md#rgb-kodak-results).
+
 The ViT regressor is trained with `--preset vit` (residual output, 40k steps; `--patch`, `--dim`, `--depth`, `--heads` override its size). On Kodak it is below the residual U-Net at every k (18.35 / 24.51 / 30.78 dB versus 18.60 / 26.14 / 32.00 dB) and below the plain CNN at k=2 and k=3; see the ViT section under the hybrid.
 
 ## 4. Shared Generative Backbone: TimeUNet
 
-Diffusion and flow matching use `TimeUNet`, not the regression U-Net. Its input channels concatenate the current one-channel residual state `x_t` with the `k` encoded bitplanes. A sinusoidal embedding of continuous time `t` is passed through an MLP. At every resolution, residual blocks apply GroupNorm, SiLU, a 3x3 convolution, add a projected time embedding, then apply another GroupNorm/SiLU/3x3 convolution and a skip connection. Strided convolutions downsample; nearest-neighbor upsampling and skip concatenation restore resolution. The final normalized activation and 3x3 convolution produce a one-channel prediction. The final convolution is initialized to zero.
+Diffusion and flow matching use `TimeUNet`, not the regression U-Net. For `C` image channels its input concatenates the `C`-channel residual state `x_t` with the `C*k` encoded top-plane channels, and its output has `C` channels. A sinusoidal embedding of continuous time `t` is passed through an MLP. At every resolution, residual blocks apply GroupNorm, SiLU, a 3x3 convolution, add a projected time embedding, then apply another GroupNorm/SiLU/3x3 convolution and a skip connection. Strided convolutions downsample; nearest-neighbor upsampling and skip concatenation restore resolution. The final normalized activation and 3x3 convolution produce the residual prediction. The final convolution is initialized to zero.
 
 `TimeUNet` has no attention. Its time and output are interpreted differently by diffusion and flow matching below.
 
@@ -247,7 +260,7 @@ This is the paper-style bit-depth recovery path. It differs from MSBNet: each ne
 
 ### Training input, target, and architecture
 
-For a training image, the input is quantized to `input_bits` while retaining the full-depth numeric scale. The target is the next lower bitplane as a binary tensor. For example, an 8-bit input quantized to 3 bits is paired with the `B4` target; the next model takes the reconstructed 4-bit image and targets `B3`.
+For a training image, the input is quantized to `input_bits` while retaining the full-depth numeric scale. The target is the next lower bitplane as a binary tensor for every channel. For example, an 8-bit input quantized to 3 bits is paired with the `B4` target; the next model takes the reconstructed 4-bit image and targets `B3`. `BitplaneDataset` accepts grayscale `(H, W)` and RGB `(H, W, 3)` arrays and trains a matching one- or three-channel network.
 
 The model starts with a 3x3 convolution from image channels to 64 features. Each D-depth residual block applies BatchNorm, 3x3 convolution, BatchNorm, ReLU, 3x3 convolution, then adds the block input. A final BatchNorm and 3x3 convolution produce one logit per output channel/pixel. `sigmoid(logits)` gives the plane probability.
 
@@ -264,9 +277,22 @@ python -m msbgen.cli.bitdepth train --input-bits 1 --train data/processed/div2k-
 python -m msbgen.cli.bitdepth evaluate --models runs/bitdepth-d4 --test data/processed/kodak --start-bits 1 2 3 --save-images
 ```
 
+For RGB, prepare the RGB splits and train each input depth needed by the evaluation:
+
+```bash
+python -m msbgen.cli.prepare_data div2k kodak --color rgb
+for bits in 1 2 3 4 5 6 7; do
+	python -m msbgen.cli.bitdepth train --input-bits "$bits" \
+		--train data/processed/div2k-train-rgb --val data/processed/div2k-valid-rgb \
+		--out runs/bitdepth-rgb --augment --device cuda
+done
+python -m msbgen.cli.bitdepth evaluate --models runs/bitdepth-rgb \
+	--test data/processed/kodak-rgb --start-bits 1 2 3 --save-images --device cuda
+```
+
 ## 10. Shared Training, Checkpoints, and Inference
 
-The standard training CLI is `python -m msbgen.cli.train`. Its regression presets are `cnn`, `unet`, `unet-res`, and `vit`; generative presets are `diffusion`, `flow`, `normalizing-flow`, `hybrid`, and `vit-hybrid`. Prepared training/validation arrays default to `data/processed/div2k-train` and `data/processed/div2k-valid`. A run directory contains configuration, JSONL history, `last.pt` for resume, and `best.pt` for inference.
+The standard training CLI is `python -m msbgen.cli.train`. Its regression presets are `cnn`, `unet`, `unet-res`, and `vit`; generative presets are `diffusion`, `flow`, `normalizing-flow`, `hybrid`, and `vit-hybrid`. Prepared grayscale training/validation arrays default to `data/processed/div2k-train` and `data/processed/div2k-valid`; RGB preparation writes `data/processed/div2k-train-rgb` and `data/processed/div2k-valid-rgb`. Use matching channel modes for training and evaluation. A run directory contains configuration, JSONL history, `last.pt` for resume, and `best.pt` for inference.
 
 Standard checkpoints record model kind, configuration, inference weights, step, metrics, and training configuration. With EMA, they also retain raw training weights for resuming. `load_model()` reconstructs the PyTorch module directly; `load_reconstructor()` wraps it for the evaluation CLI, API, or web application and handles image scaling, sampling seeds, and tiling for large inputs.
 

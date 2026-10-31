@@ -10,9 +10,10 @@ python -m msbgen.cli.<tool> --help
 | --- | --- |
 | [`analyze`](analyze.py) | Dataset-level bit-plane analysis → CSV, JSON and plots |
 | [`rate`](rate.py) | Lossless adaptive range-coded top-k planes → actual bpp report |
-| [`prepare_data`](prepare_data.py) | Download and convert datasets (DIV2K, Kodak) to grayscale `.npy` |
+| [`prepare_data`](prepare_data.py) | Download and convert datasets (DIV2K, Kodak) to grayscale or RGB `.npy` |
 | [`train`](train.py) | Train a baseline, diffusion/flow-matching model, or conditional normalizing flow |
 | [`evaluate`](evaluate.py) | Score the fills (zero / mid / random) and trained checkpoints on a test set |
+| [`bitdepth`](bitdepth.py) | Train, evaluate, and plot the sequential bit-plane recovery baseline |
 | [`plot_runs`](plot_runs.py) | Plot training histories (loss, PSNR, SSIM, LR) and export them as CSV |
 | [`plot_eval`](plot_eval.py) | Plot evaluation results: all metrics per method, perception vs distortion, paired per-image comparison |
 | [`plot_steps`](plot_steps.py) | Plot generative models against their number of sampling steps (curves and perception–distortion trade-off) |
@@ -34,6 +35,39 @@ python -m msbgen.cli.train --preset diffusion           # → runs/diffusion/bes
 python -m msbgen.cli.evaluate data/processed/kodak --models runs/*/best.pt --lpips --dists --kid --samples 4
 python -m msbgen.cli.plot_eval                          # evaluation plots → outputs/plots/
 ```
+
+### RGB reconstruction workflow
+
+The default preparation and training workflow remains grayscale. RGB preparation writes
+three-channel uint8 arrays under `<root>/processed/<name>-rgb/`; the grayscale folders are
+unchanged. For RGB, `k` means k MSB planes **per channel** (3k input planes per pixel).
+
+```shell
+# Prepare RGB DIV2K and Kodak once
+python -m msbgen.cli.prepare_data div2k kodak --color rgb
+
+# Train any preset on RGB arrays; auto (the default) reads the channel count from --train
+python -m msbgen.cli.train --preset unet-res --name unet-res-rgb-k2 --k 2 \
+  --train data/processed/div2k-train-rgb --val data/processed/div2k-valid-rgb
+
+# Evaluate checkpoints against prepared RGB Kodak arrays
+python -m msbgen.cli.evaluate data/processed/kodak-rgb --k 2 \
+  --models runs/unet-res-rgb-k2/best.pt --lpips --dists --kid
+
+# Sequential bit-depth recovery uses one RGB checkpoint per missing bitplane
+for b in 1 2 3 4 5 6 7; do
+  python -m msbgen.cli.bitdepth train --input-bits "$b" \
+    --train data/processed/div2k-train-rgb --val data/processed/div2k-valid-rgb \
+    --out runs/bitdepth-rgb --augment --device cuda
+done
+python -m msbgen.cli.bitdepth evaluate --models runs/bitdepth-rgb \
+  --test data/processed/kodak-rgb --start-bits 1 2 3 --save-images
+```
+
+Use the same channel mode for training and evaluation. `train --color auto` infers it from
+the training arrays; `--color gray|rgb` can select it explicitly. Evaluation reads channel
+counts from `.npy` arrays; `evaluate --color rgb` selects RGB conversion for ordinary image
+files. Checkpoint channel mismatches are skipped by the evaluator.
 
 Every tool is a thin layer over [`msbgen.core`](../core/README.md). The numbers
 match what the web app shows for a single image.
@@ -224,19 +258,22 @@ main(["data/kodak", "--gray", "--no-ssim", "--workers", "1"])   # same as the CL
 ```shell
 python -m msbgen.cli.prepare_data --list            # available datasets
 python -m msbgen.cli.prepare_data div2k kodak       # default when no names are given
+python -m msbgen.cli.prepare_data div2k kodak --color rgb
 ```
 
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `datasets` | `div2k kodak` | Names or groups: `div2k-train`, `div2k-valid`, `kodak`; `div2k` = both DIV2K splits |
 | `--root DIR` | `data` | Data folder (git-ignored) |
+| `--color` | `gray` | `gray`: grayscale BT.601 arrays in `processed/<name>`; `rgb`: three-channel RGB arrays in `processed/<name>-rgb` |
 | `--delete-raw` | off | Delete downloads and extracted originals after conversion |
 | `--list` | | List datasets with sizes and exit |
 
 It downloads to `data/raw/` (resumable: just re-run after an interruption),
-extracts, and writes `data/processed/<name>/*.npy` (8-bit grayscale, BT.601) plus a
-`manifest.json`. Finished steps are skipped, so re-running is instant. Details are
-in [`msbgen/data/README.md`](../data/README.md).
+extracts, and writes `data/processed/<name>/*.npy` plus a `manifest.json`. Gray mode stores
+8-bit `(H, W)` BT.601 luma arrays; RGB mode stores `(H, W, 3)` RGB arrays in the separate
+`<name>-rgb` folders. Finished steps are skipped, so re-running is instant. Details are in
+[`msbgen/data/README.md`](../data/README.md).
 
 ## `train`: train a model
 
@@ -247,6 +284,8 @@ python -m msbgen.cli.train --preset diffusion                # Milestone 3
 python -m msbgen.cli.train --preset flow                     # Milestone 4
 python -m msbgen.cli.train --preset normalizing-flow         # Milestone 5
 python -m msbgen.cli.train --resume runs/unet-res/last.pt --preset unet-res
+python -m msbgen.cli.train --preset unet-res --color rgb --k 2 \
+  --train data/processed/div2k-train-rgb --val data/processed/div2k-valid-rgb
 ```
 
 **Presets:**
@@ -279,8 +318,9 @@ preset and options (and the same `--steps`: the learning-rate schedule depends o
 | `--unet-arch` | `unet` | Hybrid: stage-1 backbone, `unet` or `vit` |
 | `--crop-size`, `--scales`, `--blocks-per-scale` | 128, 4, 4 | Normalizing flow: fixed patch size, squeeze scales, and Glow blocks per scale |
 | `--condition-width`, `--hidden-width` | 32, 64 | Normalizing flow: B7 feature width and coupling subnet width |
-| `--k` | 1 | Transmitted planes (the model input is B7 … B(8−k)) |
+| `--k` | 1 | Transmitted planes per channel (the model input is B7 … B(8−k) for each channel) |
 | `--train`, `--val` | DIV2K train / valid | Folders of prepared `.npy` files (several allowed) |
+| `--color` | `auto` | `auto` infers 1 or 3 channels from training arrays; `gray` / `rgb` sets the model channel count explicitly |
 | `--steps` | 20000 (generative presets 40000) | Optimiser steps |
 | `--batch-size`, `--crop` | 16, 128 | Batch of random crops |
 | `--lr` | 2e-4 | Adam learning rate; 500-step warm-up, then cosine decay to 1e-6 |
@@ -456,8 +496,10 @@ several folders, the most recently written summary wins.
 python -m msbgen.cli.evaluate data/processed/kodak --models runs/*/best.pt --lpips
 ```
 
-Every method gets **only the top-k bits** of each image (through the
-`Reconstructor` interface) and is scored against the original. The zero, midpoint
+Every method gets **only the top-k bits of each channel** (through the
+`Reconstructor` interface) and is scored against the original. Prepared `.npy` images retain
+their stored channels; ordinary image files are loaded as grayscale by default or RGB with
+`--color rgb`. The zero, midpoint
 and random fills are included as baselines by default.
 
 **Stochastic methods** (random fill, diffusion, flow matching) are scored on their first sample
@@ -476,8 +518,10 @@ generative model.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `data` | required | Folder of prepared `.npy` files or ordinary images (converted to grayscale) |
-| `--models` | none | Checkpoints (regression, diffusion or flow); each is named after its run folder |
+| `data` | required | Folder of prepared `.npy` files or ordinary images |
+| `--color` | `gray` | Conversion for ordinary image files: `gray` or `rgb`; `.npy` channels are retained |
+| `--models` | none | Checkpoints (regression, diffusion, flow, normalizing flow, or hybrid); each is named after its run folder |
+| `--bitdepth-models` | none | Folder(s) of sequential bit-plane CNN checkpoints, trained for the same channel count as the test images |
 | `--samples N` | 1 | Draws per image for stochastic methods |
 | `--sample-steps` | checkpoint's (3; 50 in runs trained before the step sweep) | Generative models: DDIM / ODE steps |
 | `--eta` | checkpoint's (0) | Diffusion: DDIM eta; 0 = deterministic given the starting noise, 1 = fresh noise every step |

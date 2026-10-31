@@ -331,3 +331,33 @@ stochastic methods, three flow steps, two DDIM refinement steps, `refine_t=0.5`,
   schedule might change its ranking.
 
 ![vit-hybrid comparison for k=1](outputs/eval/kodak-vit-hybrid-k1/images/kodim04_compare.png)
+
+31/10/2026
+
+# RGB Experiment
+
+## RGB Kodak Results
+
+RGB models were trained on the RGB DIV2K splits and evaluated on all 24 RGB Kodak images. For RGB, each `k` retains `k` MSB bitplanes in **each** of the three channels, or `3k` binary planes per pixel before entropy coding. The table gives mean PSNR in dB; the complete per-model metric tables (SSIM, LPIPS, DISTS, MAE, MSB consistency, KID, sample-mean PSNR, diversity and time) are in [REPORT.md](REPORT.md#rgb-kodak-results).
+
+| Method | k=1 | k=2 | k=3 |
+| --- | ---: | ---: | ---: |
+| Zero fill | 10.79 | 16.66 | 22.78 |
+| Midpoint fill | 16.74 | 22.76 | 28.61 |
+| Random fill | 13.73 | 19.76 | 25.70 |
+| CNN | 18.06 | 25.62 | 31.42 |
+| U-Net | 18.43 | 25.88 | 31.03 |
+| Residual U-Net | 18.39 | 25.34 | 30.85 |
+| ViT | 18.57 | 26.25 | 32.05 |
+| Normalizing flow | 14.89 | 20.51 | 25.96 |
+| Flow matching | 18.06 | 26.19 | 32.29 |
+| Diffusion | 17.97 | 26.18 | 32.32 |
+| Hybrid | 18.56 | 26.48 | 32.52 |
+| Hybrid, stage 1 | 18.46 | 26.25 | 31.84 |
+| Hybrid, stages 1+2 | 18.51 | 26.41 | 32.45 |
+| ViT hybrid | 18.72 | 26.65 | 32.58 |
+| ViT hybrid, stage 1 | 18.82 | 26.26 | 31.89 |
+| ViT hybrid, stages 1+2 | 18.70 | 26.51 | 32.50 |
+| Sequential bitplane CNN (D4) | 18.40 | **27.00** | **33.89** |
+
+The ViT-hybrid stage-1 ablation has the highest PSNR at k=1 (18.82 dB); sequential bit-depth recovery has the highest PSNR at k=2 and k=3. Perceptual rankings differ by metric: the U-Net hybrid tends to have the strongest LPIPS/DISTS, while the best KID changes with k. These are single-run results on Kodak and should be treated as a benchmark, not evidence of generalization. See the [complete RGB comparison](REPORT.md#rgb-kodak-results) for per-metric detail and artifacts.
