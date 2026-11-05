@@ -124,8 +124,21 @@ class MethodResult(BaseModel):
     lpips: float | None = Field(None, description="LPIPS, lower is better; null if unavailable (see `perceptual`)")
     dists: float | None = Field(None, description="DISTS, lower is better; null if unavailable (see `perceptual`)")
     psnr_gain: float | None = Field(description="PSNR minus midpoint-fill PSNR (dB)")
+    time_s: float | None = Field(
+        None, description="Reconstruction time in seconds; excludes model loading and thermal-guard pauses"
+    )
     image: str = Field(description="Reconstruction as an 8-bit PNG data URL")
     error_map: str = Field(description="|I - Î| × 4 as an 8-bit PNG data URL (brighter = larger error)")
+
+
+class ModelCandidate(BaseModel):
+    name: str = Field(description="Model name, as accepted by /api/reconstruct/model")
+    kind: str = Field(description="'checkpoint' or 'bitdepth'")
+
+
+class ModelRunResponse(BaseModel):
+    result: MethodResult
+    note: str | None = Field(None, description="E.g. that the model fell back to CPU")
 
 
 class ReconstructResponse(ImageInfo):
@@ -133,6 +146,9 @@ class ReconstructResponse(ImageInfo):
     original: str = Field(description="The selected-color image that was reconstructed, as a PNG data URL")
     results: list[MethodResult] = Field(description="Fills first (zero, mid, random), then models")
     perceptual: list[str] = Field(default_factory=list, description="Perceptual metrics computed: 'lpips', 'dists'")
+    candidates: list[ModelCandidate] = Field(
+        default_factory=list, description="Models compatible with this color mode and k, in run order"
+    )
 
 
 class MetricStat(BaseModel):

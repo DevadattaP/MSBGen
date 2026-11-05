@@ -3,6 +3,7 @@
 const API_BITPLANES = "/api/bitplanes";
 const API_ANALYSIS = "/api/analysis";
 const API_RECONSTRUCT = "/api/reconstruct";
+const API_RECONSTRUCT_MODEL = "/api/reconstruct/model";
 const CHANNEL_COLORS = { R: "var(--ch-r)", G: "var(--ch-g)", B: "var(--ch-b)", L: "var(--ch-gray)" };
 const FILL_SERIES = [
   { fill: "mid", name: "Midpoint fill", color: "var(--series-mid)", dashed: false },
@@ -297,9 +298,10 @@ async function runMode(mode, id) {
 
 async function runReconstruction(mode, k, id, file, state) {
   if (id !== requestId) return;
-  showModelsStatus(`Running ${mode === "L" ? "grayscale" : "RGB"} models for k=${k}…`, true);
-  const data = await postImage(API_RECONSTRUCT, file, { color_mode: mode, k });
+  showModelsStatus(`Preparing ${mode === "L" ? "grayscale" : "RGB"} baselines for k=${k}…`, true);
+  const data = await postImage(API_RECONSTRUCT, file, { color_mode: mode, k, run_models: false });
   if (id !== requestId) return;
+  data.modelRuns = {}; // per model: { state: "running" | "done" | "error", result, error, note }
   state.reconstructions.set(k, data);
   if (mode === selectedColorMode && k === selectedK) renderModels(data);
 }
@@ -315,30 +317,37 @@ function showModelsStatus(message, busy) {
 }
 
 function renderModels(data) {
-  showNotes(data.notes);
   el.modelsStatus.hidden = true;
   el.modelsBody.hidden = false;
+  const runs = data.modelRuns ?? (data.modelRuns = {});
+  const candidates = data.candidates ?? [];
+  const done = candidates.filter((c) => runs[c.name]?.state === "done").map((c) => runs[c.name].result);
+  const all = [...data.results, ...done];
   const ratio = `${data.width} / ${data.height}`;
   const stem = fileStem(data.filename);
   const n = data.bit_depth;
   const bits = data.k === 1 ? `B${n - 1}` : `B${n - 1}…B${n - data.k}`;
-  const models = data.results.filter((r) => r.kind === "model");
+  const models = all.filter((r) => r.kind === "model");
   const perceptual = (data.perceptual ?? []).filter((m) => m in PERCEPTUAL_TITLES);
-  const scored = data.results.filter((r) => r.psnr != null);
+  const scored = all.filter((r) => r.psnr != null);
   const best = scored.reduce((a, b) => (b.psnr > a.psnr ? b : a), scored[0]);
   const top = models.reduce((a, b) => (b.psnr > (a?.psnr ?? -Infinity) ? b : a), null);
   el.modelsSummary.textContent = top
     ? `Best model: ${top.label} (${top.name}) · PSNR ${top.psnr.toFixed(2)} dB, ${gainText(top.psnr_gain)} vs midpoint fill.`
-    : "";
+    : candidates.length ? "Click a model card to run it." : "No compatible models for this color mode and k.";
   modelTiles = [];
-  el.modelsView.querySelector('[data-view="image"]').click(); // start on the reconstructions
+  const showErrors = el.modelsView.querySelector('[aria-pressed="true"]').dataset.view === "error";
   const original = { name: "original", label: "Original", image: data.original, error_map: null };
-  const tiles = [original, ...data.results].map((r) => {
+  const known = new Set(data.results.map((r) => r.name));
+  const entries = [original, ...data.results, ...candidates.filter((c) => !known.has(c.name))
+    .map((c) => (runs[c.name]?.state === "done" ? runs[c.name].result : c))];
+  const tiles = entries.map((r) => {
+    if (!("image" in r)) return renderModelPlaceholder(data, r.name, runs[r.name], ratio);
     const isOriginal = r === original;
     const stats = isOriginal ? `${data.color_mode === "L" ? "grayscale" : "RGB"}, ${data.width} × ${data.height}` :
       `PSNR ${fmt(r.psnr, 2)} dB${r.kind === "model" ? ` (${gainText(r.psnr_gain)})` : ""} · SSIM ${fmt(r.ssim)}`;
     const tile = {
-      image: r.image,
+      image: showErrors && r.error_map ? r.error_map : r.image,
       label: r.label,
       side: isOriginal ? "reference" : r.kind === "model" ? r.name : `from ${bits}`,
       tag: r === best ? "best" : "",
@@ -347,7 +356,7 @@ function renderModels(data) {
       title: isOriginal ? `Original (${data.color_mode === "L" ? "grayscale" : "RGB"})` : `${r.label} — from ${bits} only`,
       caption: isOriginal ? "The image every method is compared against." :
         `${stats} · MAE ${r.mae.toFixed(2)}${perceptual.map((m) => ` · ${PERCEPTUAL_TITLES[m]} ${fmt(r[m], 3)}`).join("")}` +
-        ` · MSB consistency ${pct(r.msb_consistency)}.`,
+        ` · MSB consistency ${pct(r.msb_consistency)} · Time ${fmt(r.time_s, 3)} s.${runs[r.name]?.note ? ` ${runs[r.name].note}` : ""}`,
       download: `${stem}_${r.name}.png`,
     };
     const node = renderTile(tile, ratio);
@@ -357,19 +366,60 @@ function renderModels(data) {
   });
   el.modelsGrid.replaceChildren(...tiles);
 
-  const rows = data.results.map((r) => {
+  const rows = all.map((r) => {
     const gain = r.kind === "model" || r.name !== "mid" ? gainText(r.psnr_gain, true) : "—";
     return `<tr><td>${escapeHtml(r.label)}${r.kind === "model" ? ` <span class="hint">${escapeHtml(r.name)}</span>` : ""}</td>` +
       `<td>${r.kind === "model" ? "model" : "baseline"}</td><td>${fmt(r.psnr, 2)}</td><td>${gain}</td>` +
       `<td>${fmt(r.ssim, 4)}</td>${perceptual.map((m) => `<td>${fmt(r[m], 4)}</td>`).join("")}` +
-      `<td>${r.mae.toFixed(2)}</td><td>${pct(r.msb_consistency)}</td></tr>`;
+      `<td>${r.mae.toFixed(2)}</td><td>${pct(r.msb_consistency)}</td><td>${fmt(r.time_s, 3)}</td></tr>`;
   });
   el.modelsTable.innerHTML = `<thead><tr><th>Method</th><th>Kind</th><th>PSNR (dB)</th><th>Δ vs midpoint</th>` +
     `<th>SSIM</th>${perceptual.map((m) => `<th>${PERCEPTUAL_TITLES[m]} ↓</th>`).join("")}` +
-    `<th>MAE</th><th>MSB consistency</th></tr></thead><tbody>${rows.join("")}</tbody>`;
+    `<th>MAE</th><th>MSB consistency</th><th>Time (s)</th></tr></thead><tbody>${rows.join("")}</tbody>`;
 }
 
 const PERCEPTUAL_TITLES = { lpips: "LPIPS", dists: "DISTS" };
+
+function renderModelPlaceholder(data, name, run, ratio) {
+  const state = run?.state ?? "idle";
+  const node = el.planeTpl.content.firstElementChild.cloneNode(true);
+  const thumb = node.querySelector(".plane-thumb");
+  thumb.style.setProperty("--ratio", ratio);
+  thumb.classList.add("model-slot", state);
+  thumb.replaceChildren();
+  thumb.textContent = { idle: "Click to run", running: "Running…", error: "Failed · click to retry" }[state];
+  thumb.disabled = state === "running";
+  node.querySelector(".plane-name").textContent = name;
+  node.querySelector(".plane-weight").textContent = "model";
+  const stats = node.querySelector(".plane-stats");
+  stats.textContent = state === "error" ? run.error : state === "running" ? "Waiting for the server…" : "Not run yet";
+  stats.classList.toggle("error-text", state === "error");
+  thumb.addEventListener("click", () => runModelCard(data, name));
+  return node;
+}
+
+function refreshModels(data) {
+  if (data.color_mode === selectedColorMode && data.k === selectedK) renderModels(data);
+}
+
+function runModelCard(data, name) {
+  const run = (data.modelRuns[name] ??= {});
+  if (run.state === "running") return;
+  const id = requestId;
+  const file = currentFile;
+  Object.assign(run, { state: "running", error: null });
+  refreshModels(data);
+  return enqueueWork(async () => {
+    if (id !== requestId) return;
+    try {
+      const res = await postImage(API_RECONSTRUCT_MODEL, file, { color_mode: data.color_mode, k: data.k, model: name });
+      Object.assign(run, { state: "done", result: res.result, note: res.note });
+    } catch (err) {
+      Object.assign(run, { state: "error", error: err.message || String(err) });
+    }
+    if (id === requestId) refreshModels(data);
+  });
+}
 
 function gainText(g, html = false) {
   if (g == null) return "—";
@@ -507,7 +557,7 @@ function renderResults(data) {
 
   el.channels.replaceChildren(...sections);
   el.results.hidden = false;
-  el.results.scrollIntoView({ behavior: "smooth", block: "start" });
+  // el.results.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 const fileStem = (name) => (name || "image").replace(/\.[^.]+$/, "");

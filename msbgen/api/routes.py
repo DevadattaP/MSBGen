@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import math
+import time
 
 import numpy as np
 from fastapi import APIRouter, Form, HTTPException, UploadFile, status
@@ -25,7 +26,9 @@ from msbgen.api.schemas import (
     ImageInfo,
     MetricStat,
     MethodResult,
+    ModelCandidate,
     ModelInfo,
+    ModelRunResponse,
     ModelsResponse,
     PlaneAnalysis,
     Reconstruction,
@@ -43,6 +46,8 @@ from msbgen.core import (
     convert_color_mode,
     encode_png,
     encode_rgb_bits_png,
+    evaluate,
+    keep_top_bits,
     load_image,
     msb_reconstruction,
     reconstruct_and_evaluate,
@@ -243,111 +248,189 @@ async def models() -> ModelsResponse:
     )
 
 
-def _build_reconstruction(loaded: LoadedImage, filename: str | None, k: int, names: list[str] | None) -> ReconstructResponse:
+def _timed_reconstruct(method, image, k, n):
+    """(estimate, scores, seconds) with only `reconstruct` timed and thermal-guard pauses subtracted."""
+    top = keep_top_bits(image, k, n)
+    paused = model_registry.paused_seconds()
+    start = time.perf_counter()
+    estimate = method.reconstruct(top, k, n)
+    seconds = time.perf_counter() - start - (model_registry.paused_seconds() - paused)
+    return estimate, evaluate(image, estimate, k, n), max(seconds, 0.0)
+
+
+def _model_result(image, k, n, channels, perceptual, kind, path, device=None, with_perceptual=True):
+    """Load one model, reconstruct, score. None when the model doesn't support this mode/k."""
+    model_registry.thermal_check(force=True)  # don't start on a machine that is already hot
+    if kind == "checkpoint":
+        with model_registry.inference_lock():
+            method = model_registry.load_model(path, device)
+    else:
+        from msbgen.models.reconstructor import BitplaneReconstructor
+
+        method = BitplaneReconstructor(path, device=device or settings.device, on_step=model_registry.thermal_check)
+    if not method.supports(k, n, channels):
+        return None
+    with model_registry.inference_lock():
+        estimate, scores, seconds = _timed_reconstruct(method, image, k, n)
+    error = np.clip(np.abs(image.astype(np.float64) - estimate) * ERROR_MAP_GAIN, 0, 255).astype(np.uint8)
+    extra = {}
+    if with_perceptual:
+        with model_registry.inference_lock():
+            extra = {name: _finite(fn(image, estimate, 255.0)) for name, fn in perceptual.items()}
+    return MethodResult(
+        name=method.name, label=method.label, kind="model",
+        psnr=_finite(scores["psnr"]), ssim=_finite(scores["ssim"]), mae=scores["mae"],
+        msb_consistency=scores["msb_consistency"], **extra, time_s=seconds,
+        psnr_gain=None,
+        image=_data_url(encode_png(round_estimate(estimate, n))),
+        error_map=_data_url(encode_png(error)),
+    )
+
+
+def _model_result_with_cpu_fallback(image, k, n, channels, perceptual, kind, path):
+    """(result, note). Retries on CPU after a CUDA out-of-memory error; other errors propagate."""
+    try:
+        return _model_result(image, k, n, channels, perceptual, kind, path), None
+    except Exception as exc:  # noqa: BLE001
+        if not model_registry.cuda_requested() or not model_registry.is_cuda_oom(exc):
+            raise
+    finally:
+        model_registry.release_model_memory()
+    result = _model_result(image, k, n, channels, perceptual, kind, path, device="cpu", with_perceptual=False)
+    model_registry.release_model_memory()
+    note = "Ran on CPU after CUDA ran out of memory; perceptual scores were skipped."
+    return result, note
+
+
+def _prepare_reconstruction(loaded: LoadedImage, k: int):
     n = loaded.bit_depth
     if n != 8:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Models work on 8-bit images; this one is {n}-bit.")
     if not 1 <= k < n:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"k must be between 1 and {n - 1}.")
-    info = _image_info(loaded, filename)
     image = loaded.array[..., 0] if loaded.color_mode == "L" else loaded.array
     channels = 1 if loaded.color_mode == "L" else 3
-    perceptual = {}
+    return n, image, channels
+
+
+def _perceptual_for(image) -> tuple[dict, bool]:
+    """(metrics, skipped_because_too_large)"""
     if image.size <= settings.perceptual_max_pixels:
-        perceptual = model_registry.perceptual_metrics()
-    elif settings.perceptual:
+        return model_registry.perceptual_metrics(), False
+    return {}, settings.perceptual
+
+
+def _build_reconstruction(
+    loaded: LoadedImage, filename: str | None, k: int, names: list[str] | None, run_models: bool = True
+) -> ReconstructResponse:
+    n, image, channels = _prepare_reconstruction(loaded, k)
+    info = _image_info(loaded, filename)
+    perceptual, too_large = _perceptual_for(image)
+    if too_large:
         info["notes"] = [*info["notes"], "LPIPS and DISTS skipped: the image is too large for the perceptual metrics."]
 
     results: list[MethodResult] = []
     for method in FILL_RECONSTRUCTORS.values():
-        estimate, scores = reconstruct_and_evaluate(method, image, k, n)
+        estimate, scores, seconds = _timed_reconstruct(method, image, k, n)
         error = np.clip(np.abs(image.astype(np.float64) - estimate) * ERROR_MAP_GAIN, 0, 255).astype(np.uint8)
         with model_registry.inference_lock():
             extra = {name: _finite(fn(image, estimate, 255.0)) for name, fn in perceptual.items()}
         results.append(MethodResult(
             name=method.name, label=method.label, kind="fill",
             psnr=_finite(scores["psnr"]), ssim=_finite(scores["ssim"]), mae=scores["mae"],
-            msb_consistency=scores["msb_consistency"], **extra,
+            msb_consistency=scores["msb_consistency"], **extra, time_s=seconds,
             psnr_gain=None,
             image=_data_url(encode_png(round_estimate(estimate, n))),
             error_map=_data_url(encode_png(error)),
         ))
 
-    candidates = model_registry.model_candidates(loaded.color_mode, k)
-
-    def run_candidate(kind: str, path, device: str | None = None, include_perceptual: bool = True):
-        if kind == "checkpoint":
-            with model_registry.inference_lock():
-                method = model_registry.load_model(path, device)
-        else:
-            from msbgen.models.reconstructor import BitplaneReconstructor
-
-            method = BitplaneReconstructor(path, device=device or settings.device)
-        if not method.supports(k, n, channels):
-            return None
-        with model_registry.inference_lock():
-            estimate, scores = reconstruct_and_evaluate(method, image, k, n)
-        error = np.clip(np.abs(image.astype(np.float64) - estimate) * ERROR_MAP_GAIN, 0, 255).astype(np.uint8)
-        extra = {}
-        if include_perceptual:
-            with model_registry.inference_lock():
-                extra = {name: _finite(fn(image, estimate, 255.0)) for name, fn in perceptual.items()}
-        return MethodResult(
-            name=method.name, label=method.label, kind="model",
-            psnr=_finite(scores["psnr"]), ssim=_finite(scores["ssim"]), mae=scores["mae"],
-            msb_consistency=scores["msb_consistency"], **extra,
-            psnr_gain=None,
-            image=_data_url(encode_png(round_estimate(estimate, n))),
-            error_map=_data_url(encode_png(error)),
-        )
-
-    for kind, path in candidates:
-        candidate_name = path.parent.name if kind == "checkpoint" else path.name
-        if names and candidate_name not in names:
-            continue
-        try:
-            result = run_candidate(kind, path)
-        except Exception as exc:  # noqa: BLE001 - handle each model independently
-            if not model_registry.cuda_requested() or not model_registry.is_cuda_oom(exc):
-                info["notes"].append(f"Model {candidate_name} failed: {exc}")
-                model_registry.release_model_memory()
+    if run_models:
+        for kind, path in model_registry.model_candidates(loaded.color_mode, k):
+            candidate_name = _candidate_name(kind, path)
+            if names and candidate_name not in names:
                 continue
-            model_registry.release_model_memory()
             try:
-                result = run_candidate(kind, path, device="cpu", include_perceptual=False)
-                info["notes"].append(
-                    f"Model {candidate_name} ran on CPU after CUDA ran out of memory; perceptual scores were skipped."
+                result, note = _model_result_with_cpu_fallback(image, k, n, channels, perceptual, kind, path)
+            except Exception as exc:  # noqa: BLE001 - one broken model must not stop the rest
+                info["notes"].append(f"Model {candidate_name} failed: {exc}")
+                continue
+            finally:
+                model_registry.release_model_memory()
+            if note:
+                info["notes"].append(f"Model {candidate_name}: {note}")
+            if result is not None:
+                results.append(result)
+
+        if names:
+            found = {result.name for result in results if result.kind == "model"}
+            unknown = set(names) - found
+            if unknown:
+                raise HTTPException(
+                    status.HTTP_404_NOT_FOUND, f"No compatible model named {', '.join(sorted(unknown))}."
                 )
-            except Exception as cpu_exc:  # noqa: BLE001 - report the CPU retry failure and continue
-                info["notes"].append(f"Model {candidate_name} failed on GPU and CPU retry: {cpu_exc}")
-                result = None
-        finally:
-            model_registry.release_model_memory()
-        if result is not None:
-            results.append(result)
 
-    if names:
-        found = {result.name for result in results if result.kind == "model"}
-        unknown = set(names) - found
-        if unknown:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, f"No compatible model named {', '.join(sorted(unknown))}.")
+    _fill_psnr_gain(results)
+    candidates = [
+        ModelCandidate(name=_candidate_name(kind, path), kind=kind)
+        for kind, path in model_registry.compatible_candidates(loaded.color_mode, k, n, channels)
+    ]
+    return ReconstructResponse(**info, k=k, original=_data_url(encode_png(image)), results=results,
+                               perceptual=list(perceptual), candidates=candidates)
 
-    mid = next(r.psnr for r in results if r.name == "mid")
+
+def _candidate_name(kind: str, path) -> str:
+    return path.parent.name if kind == "checkpoint" else path.name
+
+
+def _fill_psnr_gain(results: list[MethodResult], mid: float | None = None) -> None:
+    if mid is None:
+        mid = next(r.psnr for r in results if r.name == "mid")
     for r in results:
         r.psnr_gain = r.psnr - mid if r.psnr is not None and mid is not None else None
-    return ReconstructResponse(**info, k=k, original=_data_url(encode_png(image)), results=results,
-                               perceptual=list(perceptual))
 
 
 @router.post("/reconstruct", response_model=ReconstructResponse)
 async def reconstruct(
-    file: UploadFile, k: int = Form(1), models: str | None = Form(None), color_mode: str | None = Form(None)
+    file: UploadFile, k: int = Form(1), models: str | None = Form(None), color_mode: str | None = Form(None),
+    run_models: bool = Form(True),
 ) -> ReconstructResponse:
     """Reconstruct the image from its top k planes with the fills (zero, mid, random) and every compatible
     trained model (or only `models`, comma-separated), preserving the selected color mode."""
     loaded = await _load_upload(file, color_mode)
     names = [m.strip() for m in models.split(",") if m.strip()] if models else None
-    return await run_in_threadpool(_build_reconstruction, loaded, file.filename, k, names)
+    return await run_in_threadpool(_build_reconstruction, loaded, file.filename, k, names, run_models)
+
+
+def _run_single_model(loaded: LoadedImage, k: int, name: str) -> ModelRunResponse:
+    n, image, channels = _prepare_reconstruction(loaded, k)
+    match = next(
+        ((kind, path) for kind, path in model_registry.model_candidates(loaded.color_mode, k)
+         if _candidate_name(kind, path) == name),
+        None,
+    )
+    if match is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No model named {name} for this color mode and k.")
+    perceptual, _ = _perceptual_for(image)
+    try:
+        result, note = _model_result_with_cpu_fallback(image, k, n, channels, perceptual, *match)
+    except Exception as exc:  # noqa: BLE001 - reported on the model's card
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"{type(exc).__name__}: {exc}") from exc
+    finally:
+        model_registry.release_model_memory()
+    if result is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{name} does not support this color mode and k.")
+    _, mid_scores = reconstruct_and_evaluate(FILL_RECONSTRUCTORS["mid"], image, k, n, with_ssim=False)
+    _fill_psnr_gain([result], _finite(mid_scores["psnr"]))
+    return ModelRunResponse(result=result, note=note)
+
+
+@router.post("/reconstruct/model", response_model=ModelRunResponse)
+async def reconstruct_model(
+    file: UploadFile, model: str = Form(...), k: int = Form(1), color_mode: str | None = Form(None)
+) -> ModelRunResponse:
+    """Run one model (by name) on the image's top k planes."""
+    loaded = await _load_upload(file, color_mode)
+    return await run_in_threadpool(_run_single_model, loaded, k, model)
 
 
 def _metric_stat(value) -> MetricStat | None:

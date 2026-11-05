@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import threading
+from functools import lru_cache
 from pathlib import Path
 
 from msbgen.config import settings
@@ -28,13 +29,26 @@ _guard = None  # ThermalGuard, created on first use
 _perceptual: dict | None = None  # name → metric(reference, estimate, data_range), loaded on first use
 
 
-def _thermal_check() -> None:
+def _thermal_guard():
     global _guard
     if _guard is None:
-        from msbgen.utils.thermal import ThermalGuard
+        from msbgen.utils.thermal import ThermalGuard, ThermalLimits
 
-        _guard = ThermalGuard()
-    _guard.check()
+        _guard = ThermalGuard(ThermalLimits(
+            gpu_max_c=settings.gpu_max_c, gpu_resume_c=settings.gpu_max_c - 8,
+            cpu_max_c=settings.cpu_max_c, cpu_resume_c=settings.cpu_max_c - 10,
+            check_every_s=1.0,
+        ))
+    return _guard
+
+
+def thermal_check(force: bool = False) -> None:
+    """Block while the GPU or CPU is too hot; `force` skips the sensor-read rate limit."""
+    _thermal_guard().check(force=force)
+
+
+def paused_seconds() -> float:
+    return _guard.paused_s if _guard is not None else 0.0
 
 
 def torch_available() -> bool:
@@ -121,7 +135,35 @@ def model_candidates(color_mode: str, k: int) -> list[tuple[str, Path]]:
 def load_model(path: Path, device: str | None = None):
     from msbgen.models import load_reconstructor
 
-    return load_reconstructor(path, device=device or settings.device, on_step=_thermal_check)
+    return load_reconstructor(path, device=device or settings.device, on_step=thermal_check)
+
+
+@lru_cache(maxsize=1024)
+def _is_compatible(kind: str, path: Path, mtime: float, k: int, n: int, channels: int) -> bool:
+    try:
+        if kind == "checkpoint":
+            from msbgen.models import read_checkpoint
+
+            cfg = read_checkpoint(path)["model_config"]
+            return (cfg["k"], cfg["bit_depth"], cfg["channels"]) == (k, n, channels)
+        from msbgen.models.reconstructor import BitplaneReconstructor
+
+        return BitplaneReconstructor(path, device="cpu").supports(k, n, channels)
+    except Exception:  # noqa: BLE001 - unreadable models are simply not offered
+        return False
+
+
+def compatible_candidates(color_mode: str, k: int, n: int, channels: int) -> list[tuple[str, Path]]:
+    """Ordered candidates that can run at this mode and k (cached per file modification time)."""
+    found = []
+    for kind, path in model_candidates(color_mode, k):
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        if _is_compatible(kind, path, mtime, k, n, channels):
+            found.append((kind, path))
+    return found
 
 
 def cuda_requested() -> bool:

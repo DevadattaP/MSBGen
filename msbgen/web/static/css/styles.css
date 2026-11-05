@@ -322,6 +322,14 @@ h2 { font-size: 1.05rem; }
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 210px), 1fr));
 }
 .plane.best { border-color: var(--ch-g); box-shadow: 0 0 0 1px var(--ch-g); }
+.plane-thumb.model-slot {
+  display: grid; place-items: center; background: var(--surface-2); color: var(--muted);
+  font: inherit; font-size: 0.85rem; font-weight: 600; cursor: pointer;
+}
+.plane-thumb.model-slot:hover:not(:disabled) { color: var(--accent); }
+.plane-thumb.model-slot.running { cursor: progress; }
+.plane-thumb.model-slot.error { color: var(--danger); }
+.plane-stats.error-text { color: var(--danger); white-space: normal; overflow-wrap: anywhere; }
 .plane.best .badge { background: color-mix(in srgb, var(--ch-g) 15%, transparent); color: var(--ch-g); }
 .gain-pos { color: var(--ch-g); font-weight: 600; }
 .gain-neg { color: var(--danger); font-weight: 600; }

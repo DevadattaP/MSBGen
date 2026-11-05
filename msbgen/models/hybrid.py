@@ -185,6 +185,8 @@ class MSBHybrid(nn.Module):
         top = top.float()
         cond = self.condition(top)
         r0 = self.unet_residual(top)
+        if on_step is not None:
+            on_step()
         r1 = self._coarse(cond, r0, steps, generator, on_step)
         if refine_steps == 0:
             return self.from_residual(r1, top)

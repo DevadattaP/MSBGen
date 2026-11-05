@@ -190,7 +190,7 @@ def test_api_lists_and_runs_flow(tmp_path, monkeypatch):
     from tests.test_api import _use_models_dir
 
     checks = []
-    monkeypatch.setattr(model_registry, "_thermal_check", lambda: checks.append(1))
+    monkeypatch.setattr(model_registry, "thermal_check", lambda force=False: checks.append(force))
     save_checkpoint(tmp_path / "fm" / "best.pt", MSBFlow(FlowConfig(arch_args=TINY, sample_steps=2)), step=5)
     _use_models_dir(monkeypatch, tmp_path)
     client = TestClient(app)
@@ -203,4 +203,4 @@ def test_api_lists_and_runs_flow(tmp_path, monkeypatch):
     assert res.status_code == 200, res.text
     fm = res.json()["results"][-1]
     assert fm["name"] == "fm" and fm["label"] == "Flow matching (residual)" and fm["msb_consistency"] == 1.0
-    assert len(checks) == 2
+    assert checks.count(False) == 2 and checks.count(True) == 1

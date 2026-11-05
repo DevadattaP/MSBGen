@@ -207,7 +207,7 @@ def test_api_lists_and_runs_diffusion(tmp_path, monkeypatch):
     from tests.test_api import _use_models_dir
 
     checks = []
-    monkeypatch.setattr(model_registry, "_thermal_check", lambda: checks.append(1))  # no real sensors in tests
+    monkeypatch.setattr(model_registry, "thermal_check", lambda force=False: checks.append(force))  # no real sensors
 
     model = MSBDiffusion(DiffusionConfig(arch_args=TINY, sample_steps=2))
     save_checkpoint(tmp_path / "diff" / "best.pt", model, step=5, metrics={"val_psnr": 14.0, "val_gain_db": -3.0})
@@ -222,4 +222,5 @@ def test_api_lists_and_runs_diffusion(tmp_path, monkeypatch):
     assert res.status_code == 200, res.text
     diff = res.json()["results"][-1]
     assert diff["name"] == "diff" and diff["kind"] == "model" and diff["msb_consistency"] == 1.0
-    assert len(checks) == 2  # thermal check after each of the 2 sampling steps
+    assert checks.count(False) == 2  # after each of the 2 sampling steps
+    assert checks.count(True) == 1  # forced check before the model starts

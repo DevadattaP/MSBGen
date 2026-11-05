@@ -356,7 +356,7 @@ def test_cuda_oom_retries_checkpoint_on_cpu(tmp_path, monkeypatch):
 
     assert attempted_devices == [None, "cpu"]
     assert any(result["name"] == "tiny-cnn" for result in body["results"])
-    assert any("ran on CPU after CUDA ran out of memory" in note for note in body["notes"])
+    assert any("Ran on CPU after CUDA ran out of memory" in note for note in body["notes"])
 
 
 def test_reconstruct_runs_rgb_bitdepth_models_after_checkpoint_failures(tmp_path, monkeypatch):
@@ -387,6 +387,49 @@ def _post_reconstruct(data: bytes, **form):
     res = client.post("/api/reconstruct", files={"file": ("x.png", data, "image/png")}, data=form)
     assert res.status_code == 200, res.text
     return res.json()
+
+
+def test_models_run_on_demand_and_errors_stay_per_model(tmp_path, monkeypatch):
+    torch = pytest.importorskip("torch")
+    from msbgen.models import ModelConfig, MSBNet, save_checkpoint
+
+    _use_models_dir(monkeypatch, tmp_path)
+    model = MSBNet(ModelConfig(arch="cnn", output="direct", arch_args={"width": 4, "depth": 2}))
+    save_checkpoint(tmp_path / "tiny-cnn" / "best.pt", model, step=1)
+    save_checkpoint(tmp_path / "other-k" / "best.pt", MSBNet(ModelConfig(
+        arch="cnn", output="direct", k=2, arch_args={"width": 4, "depth": 2})), step=1)
+    png = _encode(Image.new("L", (16, 16), 100))
+
+    body = _post_reconstruct(png, color_mode="L", k=1, run_models="false")
+    assert [r["name"] for r in body["results"]] == ["zero", "mid", "random"]
+    assert [c["name"] for c in body["candidates"]] == ["tiny-cnn"]
+
+    res = client.post("/api/reconstruct/model", files={"file": ("x.png", png)},
+                      data={"model": "tiny-cnn", "k": 1, "color_mode": "L"})
+    assert res.status_code == 200, res.text
+    assert res.json()["result"]["name"] == "tiny-cnn" and res.json()["result"]["psnr_gain"] is not None
+
+    res = client.post("/api/reconstruct/model", files={"file": ("x.png", png)},
+                      data={"model": "missing", "k": 1, "color_mode": "L"})
+    assert res.status_code == 404
+
+
+def test_reconstruct_reports_time_and_guards_regression_models(tmp_path, monkeypatch):
+    pytest.importorskip("torch")
+    from msbgen.api import model_registry
+    from msbgen.models import ModelConfig, MSBNet, save_checkpoint
+
+    _use_models_dir(monkeypatch, tmp_path)
+    checks = []
+    monkeypatch.setattr(model_registry, "thermal_check", lambda force=False: checks.append(force))
+    save_checkpoint(tmp_path / "tiny-cnn" / "best.pt", MSBNet(ModelConfig(
+        arch="cnn", output="direct", arch_args={"width": 4, "depth": 2})), step=1)
+
+    body = _post_reconstruct(_encode(Image.new("L", (16, 16), 100)), color_mode="L", k=1)
+
+    assert [r["name"] for r in body["results"]] == ["zero", "mid", "random", "tiny-cnn"]
+    assert all(r["time_s"] is not None and r["time_s"] >= 0 for r in body["results"])
+    assert checks.count(True) == 1 and checks.count(False) >= 1
 
 
 def test_reconstruct_errors(tmp_path, monkeypatch):

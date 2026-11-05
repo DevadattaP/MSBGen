@@ -809,12 +809,6 @@ $$
 B_7,B_6,B_5
 $$
 
-### Experiment D
-
-$$
-B_7,B_6,B_5,B_4.
-$$
-
 The question becomes:
 
 > **How many bits of explicit information are required before generative reconstruction becomes reliably useful?**
@@ -1108,85 +1102,18 @@ The initial experiment uses 128×128 patches, 40k optimiser steps, batch size 16
 
 The dequantized continuous likelihood is an estimate of discrete residual coding cost, not an achieved lossless bitrate. Exact coded bpp still requires discrete bin probabilities and an entropy coder (Milestone 8).
 
-### First-run results (Kodak, k=1)
-
-The 40k-step run completed normally. Its best checkpoint was at step 40k with validation dequantized NLL 4.2647 bits/residual-dimension; validation PSNR was 16.21 dB, 1.17 dB below midpoint fill (17.38 dB on the validation crops). The validation PSNR curve rose slowly and flattened near 16.2 dB, while the training NLL continued to fall, indicating a modest train/validation gap but no run failure.
-
-| Method | PSNR ↑ | SSIM ↑ | LPIPS ↓ | DISTS ↓ | KID × 10³ ↓ |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Midpoint fill | 17.01 | 0.579 | 0.517 | 0.364 | 81.8 |
-| Residual U-Net | 18.60 | 0.637 | 0.455 | 0.293 | 79.8 |
-| Diffusion, 3 steps | 17.75 | 0.610 | 0.424 | 0.257 | 54.6 |
-| Flow matching, 3 steps | 18.11 | 0.615 | 0.419 | 0.252 | 54.9 |
-| Normalizing flow, one sample | 15.77 | 0.410 | 0.577 | 0.316 | 120.0 |
-| Normalizing flow, 256-pixel patches | 15.85 | 0.423 | 0.568 | 0.320 | 124.9 |
-
-These test metrics average over the same 24 Kodak images; stochastic-model KID uses eight samples per image. The normalizing flow's eight-sample mean reaches 17.69 dB, 1.92 dB above its single-sample PSNR and 0.68 dB above midpoint fill, but remains below the residual U-Net. Its mean diversity is 23.94 intensity levels, much higher than diffusion/flow matching at about 6.1. Against residual U-Net, it wins per-image PSNR, SSIM, and LPIPS on 0/24 images, and DISTS on 7/24. Its KID (0.120) is worse than the random-fill set (0.119) and much worse than flow matching (0.055). MSB consistency is exact. The inspected sample strips show noisy texture and visible independent-patch boundaries.
-
-### 256-pixel patch ablation
-
-Both checkpoints use the same 40k steps, four scales, four blocks per scale, train/validation sets and seed. Only patch/crop size and batch size changed (128/16 to 256/4).
-
-| Patch size | PSNR ↑ | PSNR avg ↑ | SSIM ↑ | LPIPS ↓ | DISTS ↓ | KID × 10³ ↓ | Diversity | Time/image |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 128 | 15.77 | 17.69 | 0.410 | 0.577 | **0.316** | **120.0** | 23.94 | 18 ms |
-| 256 | **15.85** | **17.70** | **0.423** | **0.568** | 0.320 | 124.9 | 22.98 | **14 ms** |
-
-The 0.08 dB single-sample PSNR and 0.02 dB sample-mean PSNR gains are negligible for this 24-image test. SSIM/LPIPS improve slightly, while DISTS/KID worsen slightly; the set-level KID is near the 128-patch value within its reported subset spread. Against residual U-Net, the 256 model wins PSNR, SSIM, and LPIPS on 0/24 images and DISTS on 6/24. Visually, 256 reduces the obvious patch grid in the inspected scene but still produces noisy, soft structure. It also runs about 22% faster per image because it uses fewer, larger patches. This is not enough to justify another NF architecture run.
-
-**Interpretation:** the code, likelihood, inverse sampling, and MSB preservation function, but this conditional Glow configuration is not a competitive perceptual decoder. Keep both checkpoints/results as a negative baseline. The dequantized NLL remains a density-model metric, not achieved lossless bpp. Do not build the planned NF+FM+diffusion hybrid on this result.
-
-### Next: finish Milestone 7
-
-Proceed with a controlled k=3 comparison. The k=1 and k=2 runs already cover CNN, direct U-Net, residual U-Net, diffusion, and flow matching. Train those five models at k=3, then evaluate k=1/2/3 together on Kodak with the same metrics and eight samples per stochastic model. For diffusion and flow matching, use 1, 2, 3, and 5 sampling steps; k=1 and k=2 sweeps show there is no universal step-count optimum. Keep the normalizing flow as a k=1 negative control, but do not train k=2/3 versions unless a later research question specifically targets likelihood rather than decoder quality. Defer Milestone 6 (hybrid) until the cross-k results reveal a concrete benefit to combine.
-
-Suggested HPC commands for k=3 training (run each; preserve these names):
-
-```shell
-python -m msbgen.cli.train --preset cnn --name cnn-k3 --k 3 --steps 20000 --device cuda --no-thermal-guard
-python -m msbgen.cli.train --preset unet --name unet-k3 --k 3 --steps 20000 --device cuda --no-thermal-guard
-python -m msbgen.cli.train --preset unet-res --name unet-res-k3 --k 3 --steps 20000 --device cuda --no-thermal-guard
-python -m msbgen.cli.train --preset diffusion --name diffusion-k3 --k 3 --steps 40000 --device cuda --no-thermal-guard
-python -m msbgen.cli.train --preset flow --name flow-k3 --k 3 --steps 40000 --device cuda --no-thermal-guard
-
-python -m msbgen.cli.evaluate data/processed/kodak \
-      --models runs/cnn-k3/best.pt runs/unet-k3/best.pt runs/unet-res-k3/best.pt \
-      runs/diffusion-k3/best.pt runs/flow-k3/best.pt \
-      --lpips --dists --kid --samples 8 --sample-steps 3 \
-      --out outputs/eval/kodak-k3
-
-python -m msbgen.cli.plot_eval outputs/eval/kodak-k3 \
-      --pair flow-k3 unet-res-k3 --out outputs/plots/k3
-```
-
 ---
 
 ## Milestone 6 — Hybrid model
 
-**Status:** first version complete (k=1/2/3 on Kodak). The NF-based hybrids stay dropped (the NF was a negative result); the hybrid actually built is the plan's section-15 alternative: **residual U-Net -> flow matching (correction `r - r0`) -> truncated diffusion refinement**, trained from a frozen `unet-res` (`--preset hybrid`, `run_msbgen_hybrid.slurm`, `msbgen/models/hybrid.py`).
-
-| k | Hybrid PSNR / DISTS / KID | Best single-sample PSNR to beat | Sequential bitplane CNN (D4) PSNR |
-| ---: | --- | --- | ---: |
-| 1 | 18.22 / 0.2594 / 46.9 | 18.60 (residual U-Net) | 18.56 |
-| 2 | 25.99 / 0.1249 / 17.3 | 26.14 (residual U-Net) | 25.65 |
-| 3 | 31.65 / 0.0681 / 5.9 | 32.00 (residual U-Net) | **32.04** |
-
-Outcome: best perceptual scores at k=2/3 (DISTS, KID, LPIPS) and best 8-sample-mean PSNR, but single-sample PSNR is still below the residual U-Net, and at k=3 below the sequential bitplane CNN. The shared evaluator now reports LPIPS, DISTS, KID and MSB consistency for D4 as well: at k=3, D4 has 32.04 dB PSNR while the hybrid has lower LPIPS (0.0905 vs. 0.1425), DISTS (0.0681 vs. 0.0943) and KID (5.93 vs. 21.15). The stage ablation shows refinement trades about 0.04 dB at k=3 for better DISTS/KID.
+The NF-based hybrids stay dropped (the NF was a negative result); the hybrid actually built is the plan's section-15 alternative: **residual U-Net -> flow matching (correction `r - r0`) -> truncated diffusion refinement**, trained from a frozen `unet-res` (`--preset hybrid`, `run_msbgen_hybrid.slurm`, `msbgen/models/hybrid.py`).
 
 **Next experiments (goal: beat the sequential bitplane CNN on distortion):**
 
 1. Try training the U-Net jointly (omit `--freeze-unet`, `--unet-weight`), a stronger stage-1 (wider/deeper, or the sequential model as stage 1), and tune `refine_t`, `--refine-steps` and flow steps (PSNR vs perceptual trade-off).
 2. Repeat over seeds, report paired uncertainty, and add tiled hybrid inference for large images.
 
-**Milestone 6b — ViT experiment (complete, k=1/2/3 on Kodak).** A residual ViT regressor (`--preset vit`, 8×8 patches, 192-d, 6 blocks, 2.9 M params) and a ViT-based hybrid (`--preset vit-hybrid`: ViT -> flow -> diffusion, stage 1 trained jointly from scratch, 10.9 M params) were trained with the same recipe as the other models.
-
-| k | ViT PSNR / DISTS / KID | ViT hybrid PSNR / DISTS / KID | U-Net hybrid PSNR / DISTS / KID |
-| ---: | --- | --- | --- |
-| 1 | 18.35 / 0.2932 / 89.8 | **18.64** / 0.2618 / 49.2 | 18.22 / 0.2594 / 46.9 |
-| 2 | 24.51 / 0.1644 / 48.2 | 24.71 / 0.1314 / 19.5 | 25.99 / 0.1249 / 17.3 |
-| 3 | 30.78 / 0.0976 / 23.4 | 31.21 / 0.0700 / 7.1 | 31.65 / 0.0681 / 5.9 |
-
-Outcome: the standalone ViT is below the residual U-Net at every k (and below the CNN at k=2/3). The ViT hybrid gives the best single-sample PSNR of all models at k=1 (18.64 dB, 8-sample mean 18.83 dB) but trails the U-Net hybrid in perceptual metrics at k=1 and on every metric at k=2/3. Generative stages improve the ViT strongly on LPIPS/DISTS/KID. Open items: tune ViT size/patch/lr/EMA, warm-start and freeze the ViT stage 1 for a like-for-like comparison with the U-Net hybrid, and repeat over seeds.
+**Milestone 6b — ViT experiment (k=1/2/3 on Kodak).** A residual ViT regressor (`--preset vit`, 8×8 patches, 192-d, 6 blocks, 2.9 M params) and a ViT-based hybrid (`--preset vit-hybrid`: ViT -> flow -> diffusion, stage 1 trained jointly from scratch, 10.9 M params) were trained with the same recipe as the other models.
 
 ---
 
@@ -1206,56 +1133,11 @@ $$
 B_7+B_6+B_5.
 $$
 
-### k=2 pilot results (completed; followed by completed k=3 run)
-
-The Kodak evaluation uses the same 24 images at k=1 and k=2. Mean PSNR (dB) improved across every tested method:
-
-| Method | k=1 | k=2 | Change |
-| --- | ---: | ---: | ---: |
-| Midpoint fill | 17.01 | 22.63 | +5.62 |
-| CNN | 18.04 | 25.13 | +7.09 |
-| U-Net | 18.55 | 25.90 | +7.35 |
-| Residual U-Net | 18.60 | 26.14 | +7.54 |
-| Diffusion (3 steps) | 17.75 | 25.63 | +7.88 |
-| Flow matching (3 steps) | 18.11 | 25.60 | +7.50 |
-
-For the matched 3-step generative evaluations, DISTS and patch KID also improved from k=1 to k=2:
-
-| Model | k=1 PSNR / DISTS / KID | k=2 PSNR / DISTS / KID |
-| --- | ---: | ---: |
-| Diffusion | 17.75 / 0.2567 / 0.0546 | 25.63 / 0.1292 / 0.0261 |
-| Flow matching | 18.11 / 0.2519 / 0.0549 | 25.60 / 0.1302 / 0.0253 |
-
-PSNR is for one sample; DISTS is lower-is-better, and KID is computed over eight generated samples per image. At k=2, residual U-Net has the best single-sample PSNR (26.14 dB), while diffusion and flow matching have better perceptual scores (DISTS 0.129-0.130 vs 0.155; KID 0.025-0.026 vs 0.042). The mean of eight generative samples reaches about 26.24 dB, slightly above residual U-Net, at the cost of eight draws. Residual-output models preserve the transmitted planes exactly; direct CNN/U-Net outputs have small MSB-consistency errors.
-
-There is no single best step count across metrics or k. At k=1, one step gives the highest single-sample PSNR, two steps the lowest KID, and five steps the lowest DISTS. At k=2, one step gives the highest single-sample PSNR, two steps the best PSNR of the eight-sample mean (about 26.24-26.25 dB), and three steps the lowest DISTS/KID. Moving from two to three steps costs about 0.23 dB in single-sample PSNR but improves DISTS/KID; beyond three steps those perceptual scores worsen while diversity rises. In this evaluator, k=2 diffusion/flow matching takes about 20, 41, 60, 99, and 960 ms per image at 1, 2, 3, 5, and 50 steps, respectively, versus about 6 ms for residual U-Net. In the inspected Kodak example, k=2 also preserves the broad window layout better than k=1, though fine detail is still smoothed or synthesized. These are pilot results on 24 Kodak images, not evidence of generalization. The raw input cost doubles from 1 to 2 bits/pixel; actual coded bitrate has not yet been measured.
-
-This pilot led to the completed k=3 comparison below. The normalizing-flow track was evaluated separately and retained as a negative k=1 baseline; it was not extended to k=2 or k=3.
-
-### k=3 results (completed)
-
-The corrected Kodak evaluation uses the same 24 images, k=3, eight samples for each stochastic model, and three generative sampling steps. All five k=3 checkpoints are present and the evaluation metadata is correct.
-
-| Method | PSNR ↑ | SSIM ↑ | LPIPS ↓ | DISTS ↓ | KID × 10³ ↓ | MSB consistency |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Midpoint fill | 28.74 | 0.824 | 0.210 | 0.129 | 24.2 | 1.000 |
-| CNN | 31.10 | 0.891 | 0.143 | 0.094 | 21.5 | 0.991 |
-| U-Net | 30.87 | 0.885 | 0.153 | 0.099 | 23.7 | 0.986 |
-| Residual U-Net | **32.00** | **0.901** | 0.117 | 0.085 | 19.0 | 1.000 |
-| Diffusion, 3 steps | 31.58 | 0.895 | **0.094** | **0.072** | **8.6** | 1.000 |
-| Flow matching, 3 steps | 31.51 | 0.894 | 0.095 | 0.072 | 9.0 | 1.000 |
-
-Adding B5 produces another roughly 6 dB gain over k=2: midpoint rises from 22.63 to 28.74 dB, residual U-Net from 26.14 to 32.00 dB, diffusion from 25.63 to 31.58 dB, and flow matching from 25.60 to 31.51 dB. At k=3 the generative models nearly match the residual U-Net in PSNR, while their DISTS and KID are substantially better. Their eight-sample mean reaches 32.37 dB for diffusion and 32.34 dB for flow matching, above the residual U-Net, with diversity only 2.35-2.42 intensity levels. Direct CNN/U-Net still violate the transmitted planes slightly; residual and generative models remain exact.
-
-The k=3 step sweep confirms the same perception-distortion pattern as k=1 and k=2: one step gives the highest PSNR and lowest latency, while three-to-five steps are the perceptual operating region. At three steps, diffusion is marginally ahead of flow matching (31.58 vs 31.51 dB, DISTS 0.0717 vs 0.0719, KID 8.6 vs 9.0 × 10^-3); the difference is small relative to the 24-image benchmark. No additional k=3 architecture training is justified.
-
-Raw input cost is now 1, 2, or 3 bits/pixel before entropy coding. The reconstruction experiments show a strong rate-quality curve, but they do not establish the actual compressed rate. **Next:** begin Milestone 8: measure per-plane entropy/context entropy, implement lossless coding for the transmitted planes, and report actual bpp alongside PSNR, DISTS, KID, and decoding time. Defer the NF track unless the compression study creates a likelihood-specific question; the hybrid track is covered by Milestone 6.
+i.e. k=1 vs k=2 vs k=3
 
 ---
 
 ## Milestone 8 — Actual compression
-
-**Status:** reference coder and Kodak rate measurement complete; production codec refinements remain.
 
 The reference implementation encodes each transmitted top-k plane with an
 adaptive binary range coder using the four causal neighbours already used by
@@ -1271,53 +1153,6 @@ Run it on Kodak for the three operating points:
 python -m msbgen.cli.rate data/processed/kodak --gray --ks 1 2 3 \
       --out outputs/rate/kodak
 ```
-
-### Kodak rate results
-
-The reference coder successfully round-tripped all 24 prepared Kodak images at
-each k. The measured framed stream rates are:
-
-| k | Raw rate | Context estimate | Arithmetic payload | Framed stream | Added rate |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 1.000 bpp | 0.165 bpp | 0.165 bpp | **0.165 bpp** | 0.165 bpp |
-| 2 | 2.000 bpp | 0.500 bpp | 0.501 bpp | **0.501 bpp** | 0.336 bpp |
-| 3 | 3.000 bpp | 1.020 bpp | 1.021 bpp | **1.021 bpp** | 0.520 bpp |
-
-`roundtrip` was true for every image and k. The arithmetic payload is within
-0.001 bpp of the context-entropy estimate, so the reference coder is behaving as
-expected. Length-prefix overhead is negligible at Kodak image sizes. The large
-gap between raw and coded rates comes from the spatial structure of the MSB
-planes, especially B7; B5 is substantially less compressible than B6 in this
-independent-plane coder.
-
-Combining these rates with the reconstruction results gives the current rate-
-quality picture:
-
-| k / framed bpp | Midpoint PSNR | Residual U-Net PSNR | Diffusion, 3 steps | Flow matching, 3 steps |
-| ---: | ---: | ---: | ---: | ---: |
-| 1 / 0.165 | 17.01 dB | 18.60 dB | 17.75 dB, DISTS 0.257 | 18.11 dB, DISTS 0.252 |
-| 2 / 0.501 | 22.63 dB | 26.14 dB | 25.63 dB, DISTS 0.129 | 25.60 dB, DISTS 0.130 |
-| 3 / 1.021 | 28.74 dB | **32.00 dB** | 31.58 dB, **DISTS 0.072** | 31.51 dB, DISTS 0.072 |
-
-For a distortion-first decoder, residual U-Net is the current choice. For a
-perceptual decoder, diffusion or flow matching is preferable, with diffusion
-slightly ahead at k=3 and three steps. The transmitted rate is independent of
-which decoder is selected because all models receive the same top-k planes.
-
-Then combine `outputs/rate/kodak/summary.json` with the existing k=1/2/3
-evaluation summaries. The rate-quality table should contain actual framed bpp,
-PSNR, DISTS, KID, decoding time, and the raw k-bit/pixel reference. Treat the
-reference coder as a correctness baseline, not a production codec: later work
-can reduce overhead, condition lower planes on already coded higher planes, and
-use a stronger context model.
-
-Add:
-
-$$
-\text{entropy coding}.
-$$
-
-Report real bpp.
 
 ---
 

@@ -83,15 +83,24 @@ class ModelReconstructor(_CheckpointReconstructor):
     """Runs a regression checkpoint (CNN / U-Net) on the top-k image."""
 
     def __init__(self, checkpoint: Path, device: str | torch.device | None = None,
-                 name: str | None = None, tile: int = 512, margin: int = 64):
+                 name: str | None = None, tile: int = 512, margin: int = 64,
+                 on_step: Callable[[], object] | None = None):
         super().__init__(checkpoint, device, name, tile, margin)
+        self.on_step = on_step  # called after every tile, e.g. a thermal-guard check
         arch = {"unet": "U-Net", "vit": "ViT"}.get(self.config.arch, "CNN")
         self.label = f"{arch} ({self.config.output})"
 
     @torch.no_grad()
     def reconstruct(self, top: np.ndarray, k: int, bit_depth: int) -> np.ndarray:
         self._check(top, k, bit_depth)
-        out = run_tiled(lambda t: self.model(t.to(self.device)).cpu(), _to_tensor(top), self.tile, self.margin)
+
+        def run(t: torch.Tensor) -> torch.Tensor:
+            out = self.model(t.to(self.device)).cpu()
+            if self.on_step is not None:
+                self.on_step()
+            return out
+
+        out = run_tiled(run, _to_tensor(top), self.tile, self.margin)
         return _to_estimate(out, self.model.max_value, top)
 
 
@@ -250,8 +259,10 @@ class HybridReconstructor(_CheckpointReconstructor):
 class BitplaneReconstructor(Reconstructor):
     """The paper-style sequential bitplane CNNs (`runs/bitdepth-*/bit_NN.pt`): top k bits -> 8 bits (gray or RGB)."""
 
-    def __init__(self, folder: Path, device: str | torch.device | None = None, name: str | None = None):
+    def __init__(self, folder: Path, device: str | torch.device | None = None, name: str | None = None,
+                 on_step: Callable[[], object] | None = None):
         self.folder = Path(folder)
+        self.on_step = on_step  # called after every bit-plane network
         self.device = torch.device(device) if device else default_device()
         self.name = name or self.folder.name
         self.label = "Sequential bitplane CNN"
@@ -291,6 +302,8 @@ class BitplaneReconstructor(Reconstructor):
                 gc.collect()
                 if self.device.type == "cuda":
                     torch.cuda.empty_cache()
+            if self.on_step is not None:
+                self.on_step()
         return _to_estimate(current.clamp(0, 1), maximum, top)
 
 
@@ -306,7 +319,7 @@ def load_reconstructor(checkpoint: Path, device: str | torch.device | None = Non
     """
     kind = read_checkpoint(checkpoint)["model_kind"]
     sampler_keys = {"steps", "eta", "solver", "seed", "on_step", "refine_steps", "refine_t"}
-    keep = set(SAMPLER_OPTIONS.get(kind, ())) | ({"seed", "on_step"} if kind in GENERATIVE_KINDS else set())
+    keep = set(SAMPLER_OPTIONS.get(kind, ())) | {"on_step"} | ({"seed"} if kind in GENERATIVE_KINDS else set())
     kwargs = {key: v for key, v in kwargs.items() if key not in sampler_keys or key in keep}
     if kind == "diffusion":
         return DiffusionReconstructor(checkpoint, device, **kwargs)

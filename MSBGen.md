@@ -247,11 +247,9 @@ the evaluated methods. The per-image PSNR labels are specific to `kodim04` and a
    preservation of all transmitted channel MSBs. Report color-aware distortion
    and perceptual metrics under the same protocol for every baseline.
 
-
 29/10/2026
 
 # Experiment using ViT
-
 
 ## Motivation
 
