@@ -227,6 +227,111 @@
     Results are means over 24 images. Lower LPIPS and KID indicate better perceptual similarity and distributional quality, respectively. Single training runs; not a multi-seed benchmark.
 \end{frame}
 
+\begin{frame}[plain]
+    \vspace*{-0.35cm}
+    % \hspace*{-0.5cm}
+    \centering
+    \small
+    \begin{columns}[T,onlytextwidth]
+        \column{0.333\textwidth}
+        \centering
+        \textbf{Original Image}
+
+        \vspace{0.15cm}
+        \includegraphics[width=\linewidth,height=0.80\textheight,keepaspectratio]{images/original.png}
+
+        \vspace{0.15cm}
+        \footnotesize Full 8-bit image
+
+        \column{0.333\textwidth}
+        \centering
+        \textbf{First MSB Plane}
+
+        \vspace{0.15cm}
+        \includegraphics[width=\linewidth,height=0.80\textheight,keepaspectratio]{images/msb_binary.png}
+
+        \vspace{0.15cm}
+        \footnotesize Binary representation of the first MSB
+
+        \column{0.333\textwidth}
+        \centering
+        \textbf{MSB-only Image}
+
+        \vspace{0.15cm}
+        \includegraphics[width=\linewidth,height=0.80\textheight,keepaspectratio]{images/msb_reconstructed.png}
+
+        \vspace{0.15cm}
+        \footnotesize First MSB retained; all other planes set to zero
+    \end{columns}
+\end{frame}
+
+\newcommand{\PortraitResult}[8]{%
+    \begin{minipage}[t]{0.3\textwidth}
+        \centering
+        {\footnotesize\bfseries #1}\vspace{0.03cm}
+
+        \includegraphics[
+            width=0.90\linewidth,
+            height=0.80\textheight,
+            keepaspectratio
+        ]{#2}
+
+        \vspace{0.02cm}
+
+        {\fontsize{5}{5.5}\selectfont
+        \begin{tabular}{@{}lr@{}}
+            PSNR (dB) $\uparrow$ & #3 \\
+            SSIM $\uparrow$ & #4 \\
+            LPIPS $\downarrow$ & #5 \\
+            DISTS $\downarrow$ & #6 \\
+            MAE $\downarrow$ & #7 \\
+            Time (s) $\downarrow$ & #8 \\
+        \end{tabular}}
+    \end{minipage}%
+}
+
+\begin{frame}[plain]
+    \vspace*{-0.35cm}
+    \hspace*{-0.5cm}
+    \makebox[\paperwidth][c]{%
+        \PortraitResult
+            {U-Net}
+            {images/unet.png}
+            {18.01}{0.65}{0.3571}{0.2273}{26.80}{0.126}
+        % \hfill
+        \PortraitResult
+            {Flow Matching}
+            {images/flowmatching.png}
+            {18.07}{0.6323}{0.3461}{0.1851}{26.03}{0.606}
+        % \hfill
+        \PortraitResult
+            {Diffusion}
+            {images/diffusion.png}
+            {17.87}{0.6287}{0.3403}{0.1924}{26.45}{0.605}
+    }
+\end{frame}
+
+\begin{frame}[plain]
+    \vspace*{-0.35cm}
+    \hspace*{-0.5cm}
+    \makebox[\paperwidth][c]{%
+        \PortraitResult
+            {U-Net Hybrid}
+            {images/hybrid.png}
+            {18.04}{0.6423}{0.3467}{0.1844}{26.11}{1.086}
+        % \hfill
+        \PortraitResult
+            {ViT Hybrid}
+            {images/vit_hybrid.png}
+            {17.33}{0.6268}{0.3557}{0.2030}{27.28}{1.365}
+        % \hfill
+        \PortraitResult
+            {Bitdepth D4}
+            {images/bitdepth_d4.png}
+            {18.03}{0.6574}{0.3445}{0.1781}{26.26}{2.001}
+    }
+\end{frame}
+
 \begin{frame}{Conclusion and Takeaways}
     \begin{enumerate}
         \item \textbf{Feasibility:} Useful full-image reconstruction is possible even when only a small number of MSB planes are retained.
